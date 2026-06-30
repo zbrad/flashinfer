@@ -88,6 +88,7 @@ from .jit.gemm import (
 )
 from .jit.mamba import (
     gen_selective_state_update_module,
+    gen_selective_state_update_sm100_module,
     gen_selective_state_update_sm90_module,
 )
 from .jit.mhc import gen_mhc_module
@@ -708,6 +709,27 @@ def gen_all_modules(
                     )
                 )
             jit_specs.append(gen_trtllm_utils_module())
+        # The runtime dispatcher (flashinfer/mamba/selective_state_update.py)
+        # picks the sm100 variant for any sm_major >= 10 (SM100/110/120/121),
+        # matching gen_selective_state_update_sm100_module's own
+        # supported_major_versions=[10, 11, 12] — register it for all of those,
+        # not just has_sm100, or Blackwell-consumer (SM120/121) AOT builds
+        # never get an SSU module the runtime will actually pick.
+        if has_sm100 or has_sm110 or has_sm120 or has_sm121:
+            for dtype_combo, dim, dstate, ntokens, cs_dtype, na_dtype in product(
+                _ssu_dtype_combos,
+                _ssu_dims,
+                _ssu_dstates,
+                _ssu_ntokens,
+                _ssu_cu_seqlens_dtypes,
+                _ssu_num_accepted_dtypes,
+            ):
+                jit_specs.append(
+                    # same false positive as above
+                    gen_selective_state_update_sm100_module(  # type: ignore[call-arg]
+                        *dtype_combo, dim, dstate, ntokens, cs_dtype, na_dtype
+                    )
+                )
         # FP4 KV cache quantization/dequantization
         jit_specs.append(gen_fp4_kv_dequantization_module())
         if has_sm100 or has_sm103 or has_sm110 or has_sm120 or has_sm121:
