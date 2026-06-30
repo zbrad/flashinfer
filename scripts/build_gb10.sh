@@ -2,6 +2,8 @@
 # Build flashinfer for GB10 (DGX Spark, SM121a) only.
 # This is the gb10-only branch: it pins compilation to a single
 # architecture instead of the full multi-arch matrix used for releases.
+# See docs/gb10_build.md for the full guide, including the vLLM-side steps
+# needed to actually route inference through these AOT-cached kernels.
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
