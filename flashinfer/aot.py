@@ -642,6 +642,11 @@ def gen_all_modules(
                         gen_rmsnorm_silu_module(C, dtype, wm, cpr, bpl, kcfg, occ)
                     )
         # selective_state_update: one module per dtype combo per GPU arch
+        # stateIndex_dtype is registered as both int32 and int64 below: vLLM
+        # models request either depending on the model (e.g. NemotronH uses
+        # int32 slot mapping), and nothing else in this list distinguishes
+        # them, so a fixed int64-only stateIndex_dtype silently drops
+        # coverage for int32 callers under FLASHINFER_DISABLE_JIT=1.
         _ssu_dtype_combos = [
             # (state,        input,          weight,         matrixA,      stateIndex, state_scale_dtype)
             (
@@ -650,6 +655,14 @@ def gen_all_modules(
                 torch.bfloat16,
                 torch.float32,
                 torch.int64,
+                None,
+            ),
+            (
+                torch.bfloat16,
+                torch.bfloat16,
+                torch.bfloat16,
+                torch.float32,
+                torch.int32,
                 None,
             ),
             # int16 state (block-scaled quantization, scale stored as float32)
@@ -662,11 +675,27 @@ def gen_all_modules(
                 torch.float32,
             ),
             (
+                torch.int16,
+                torch.bfloat16,
+                torch.bfloat16,
+                torch.float32,
+                torch.int32,
+                torch.float32,
+            ),
+            (
                 torch.float32,
                 torch.bfloat16,
                 torch.bfloat16,
                 torch.float32,
                 torch.int64,
+                None,
+            ),
+            (
+                torch.float32,
+                torch.bfloat16,
+                torch.bfloat16,
+                torch.float32,
+                torch.int32,
                 None,
             ),
         ]
