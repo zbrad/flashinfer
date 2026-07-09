@@ -1,7 +1,8 @@
 #!/bin/bash
 # Build flashinfer for GB10 (DGX Spark, SM121a) only.
-# This is the gb10-only branch: it pins compilation to a single
-# architecture instead of the full multi-arch matrix used for releases.
+# This is the native-builds branch (renamed from gb10-only): it pins
+# compilation to a single architecture instead of the full multi-arch
+# matrix used for releases.
 # See docs/gb10_build.md for the full guide, including the vLLM-side steps
 # needed to actually route inference through these AOT-cached kernels.
 set -euo pipefail
@@ -13,7 +14,7 @@ cd "${REPO_ROOT}"
 COMPUTE_CAP=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1 | tr -d ' \r')
 if [ "${COMPUTE_CAP}" != "12.1" ]; then
   echo "ERROR: detected GPU compute capability '${COMPUTE_CAP}', expected '12.1' (GB10/SM121)." >&2
-  echo "This script targets the gb10-only branch; use main for other GPUs." >&2
+  echo "This script targets the native-builds branch; use main for other GPUs." >&2
   exit 1
 fi
 
