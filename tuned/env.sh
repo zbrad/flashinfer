@@ -33,7 +33,7 @@ GPU_TUNED_DETECTED_CC="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheade
 if [[ "${GPU_TUNED_DETECTED_CC}" != "${GPU_TUNED_COMPUTE_CAP}" ]]; then
     echo "ERROR: tuned/env.sh: detected GPU compute capability '${GPU_TUNED_DETECTED_CC}'," \
          "expected '${GPU_TUNED_COMPUTE_CAP}' (${GPU_TUNED_HW_LABEL})." >&2
-    echo "       This is the native-builds branch; use upstream main for other GPUs." >&2
+    echo "       This is the tuned-builds branch; use upstream main for other GPUs." >&2
     return 1 2>/dev/null || exit 1
 fi
 

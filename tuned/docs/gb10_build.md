@@ -2,7 +2,7 @@
 
 ## Overview
 
-The `native-builds` branch (renamed from `gb10-only`) builds FlashInfer scoped to a single machine: an NVIDIA
+The `tuned-builds` branch (renamed from `native-builds`, itself renamed from `gb10-only`) builds FlashInfer scoped to a single machine: an NVIDIA
 GB10 (DGX Spark class, compute capability 12.1 / SM121a). Instead of the full
 multi-arch release matrix and the full default AOT kernel matrix, it pins
 `FLASHINFER_CUDA_ARCH_LIST=12.1a` and trims the AOT (`flashinfer-jit-cache`)
