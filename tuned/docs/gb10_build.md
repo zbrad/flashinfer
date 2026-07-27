@@ -13,7 +13,7 @@ runtime JIT compilation**.
 Run it with:
 
 ```bash
-./scripts/build_gb10.sh
+bash tuned/build.sh gb10
 ```
 
 The script aborts if `nvidia-smi --query-gpu=compute_cap` isn't `12.1`, so
@@ -65,7 +65,7 @@ So shipping a build that "doesn't have to JIT" means: build and install the
 
 `flashinfer/aot.py`'s default AOT config compiles the full kernel matrix
 (~3800 build steps for a single-arch build) — every dtype, head_dim, and
-optional kernel family. `scripts/build_gb10.sh` instead sets `FLASHINFER_AOT_*`
+optional kernel family. `tuned/build.sh gb10` instead sets `FLASHINFER_AOT_*`
 env vars (read by `flashinfer-jit-cache/build_backend.py`'s
 `_config_overrides_from_env()`, which mirrors the CLI flags in
 `flashinfer/aot.py`'s `main()`) to scope the build to our two target models:
@@ -123,8 +123,8 @@ the merge before assuming Mamba/SSU is covered.
 
 ```bash
 <vllm-venv>/bin/pip install --force-reinstall \
-  /home/zbrad/gh/flashinfer/dist/flashinfer_python-*+gb10-*.whl \
-  /home/zbrad/gh/flashinfer/flashinfer-jit-cache/dist/flashinfer_jit_cache-*+gb10-*.whl
+  <flashinfer-repo>/dist/flashinfer_python-*+gb10-*.whl \
+  <flashinfer-repo>/flashinfer-jit-cache/dist/flashinfer_jit_cache-*+gb10-*.whl
 ```
 
 Then, in vLLM's environment:
@@ -169,4 +169,4 @@ flashinfer.single_decode_with_kv_cache(q, k, v)  # must NOT raise MissingJITCach
 
 A `flashinfer.jit.core.MissingJITCacheError` here means some op your
 deployment needs isn't in the filtered AOT config — add it back via the
-`FLASHINFER_AOT_*` env vars in `scripts/build_gb10.sh` and rebuild.
+`FLASHINFER_AOT_*` env vars in `tuned/build.sh` and rebuild.
