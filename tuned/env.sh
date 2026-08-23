@@ -24,17 +24,16 @@ fi
 GPU_TUNED_SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=devices/rtx50.conf
 source "${GPU_TUNED_SELF_DIR}/devices/${GPU_TUNED_ARG_VARIANT}.conf" || return 1 2>/dev/null || exit 1
-export GPU_TUNED_VARIANT GPU_TUNED_COMPUTE_CAP GPU_TUNED_CUDA_ARCH GPU_TUNED_HW_LABEL
+# shellcheck source=common.sh
+# Vendored from https://github.com/zbrad/tuned-common (pinned commit --
+# see common.sh's own header/sync instructions to update). Provides
+# gpu_tuned_assert_compute_cap, shared verbatim across the fleet instead
+# of hand-copied-and-edited per repo.
+source "${GPU_TUNED_SELF_DIR}/common.sh" || return 1 2>/dev/null || exit 1
 
 # Fail loudly if this isn't the intended GPU, rather than silently building
 # for whatever's actually present -- same check every one of the original
 # scripts/build_*.sh had individually, now shared.
-GPU_TUNED_DETECTED_CC="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr -d ' \r')"
-if [[ "${GPU_TUNED_DETECTED_CC}" != "${GPU_TUNED_COMPUTE_CAP}" ]]; then
-    echo "ERROR: tuned/env.sh: detected GPU compute capability '${GPU_TUNED_DETECTED_CC}'," \
-         "expected '${GPU_TUNED_COMPUTE_CAP}' (${GPU_TUNED_HW_LABEL})." >&2
-    echo "       This is the tuned-builds branch; use upstream main for other GPUs." >&2
-    return 1 2>/dev/null || exit 1
-fi
+gpu_tuned_assert_compute_cap "${GPU_TUNED_COMPUTE_CAP}" "${GPU_TUNED_HW_LABEL}" || return 1 2>/dev/null || exit 1
 
 export FLASHINFER_CUDA_ARCH_LIST="${GPU_TUNED_CUDA_ARCH}"
