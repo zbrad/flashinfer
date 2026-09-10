@@ -25,7 +25,7 @@ source "${REPO_ROOT}/tuned/env.sh" "${GPU_TUNED_ARG_VARIANT}"
 cd "${REPO_ROOT}"
 
 VERSION="$(tr -d '\r' < "${REPO_ROOT}/version.txt")"
-SHORT_VER="$(echo "${VERSION}" | sed -E 's/^0*([0-9]+)\.0*([0-9]+)\..*/\1.\2/')"
+SHORT_VER="$(gpu_tuned_short_ver "${VERSION}")" || exit 1
 
 CUDA_VER="$(nvcc --version 2>/dev/null | grep -oE 'release [0-9]+\.[0-9]+' | awk '{print $2}')"
 [[ -z "${CUDA_VER}" ]] && { echo "ERROR: could not determine CUDA version from nvcc." >&2; exit 1; }
