@@ -66,12 +66,8 @@ echo "  Assets  :"
 for a in "${ASSETS[@]}"; do echo "    - ${a%%#*}"; done
 echo ""
 echo "Publishing to GitHub release ${RELEASE_TAG}..."
-gh release create "${RELEASE_TAG}" \
-    --repo zbrad/flashinfer \
-    --title "${RELEASE_TITLE}" \
-    --target "tuned-builds" \
-    --notes "${NOTES}" \
-    "${ASSETS[@]}"
+gpu_tuned_publish_release "zbrad/flashinfer" "${RELEASE_TAG}" "${RELEASE_TITLE}" \
+    "${NOTES}" "${ASSETS[@]}"
 
 echo ""
 echo "Release: https://github.com/zbrad/flashinfer/releases/tag/${RELEASE_TAG}"
