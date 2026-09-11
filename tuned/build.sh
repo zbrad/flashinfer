@@ -44,6 +44,22 @@ echo "Python: $(python3 --version)"
 echo "Git commit: $(git rev-parse HEAD 2>/dev/null || echo 'unknown')"
 echo ""
 
+# This build installs into the shared ~/.local (--user), not a per-repo
+# venv (flashinfer's build backend doesn't work inside one -- see
+# tuned/docs/gb10_build.md) -- so unlike the fleet's other tuned/build.sh
+# scripts, there's no dedicated venv to verify or recreate. Instead, audit
+# what's already there before installing on top of it: flag a torch not
+# carrying this fleet's local-version tag (a plain PyPI torch could have
+# silently landed via some other tool's install into the same ~/.local),
+# and flag known stray packages that break flashinfer's own runtime
+# version checks just by being present (see the flashinfer-cubin
+# incident -- an unrelated PyPI package whose name collides with part of
+# flashinfer's own cubin-loading path).
+echo "::group::Audit ~/.local before installing"
+gpu_tuned_audit_pinned "python3 -m pip" "torch=${GPU_TUNED_VARIANT}"
+gpu_tuned_audit_stray "python3 -m pip" flashinfer-cubin
+echo "::endgroup::"
+
 echo "::group::Initialize submodules"
 git submodule update --init --recursive
 echo "::endgroup::"
