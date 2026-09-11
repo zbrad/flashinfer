@@ -156,20 +156,38 @@ def pytest_configure(config):
         for fn in TORCH_COMPILE_FNS:
             _monkeypatch_add_torch_compile(fn)
     # moe_ep markers (Part B of the EP API design integration).
-    config.addinivalue_line("markers", "nvep: requires BUILD_NVEP=1 install")
+    config.addinivalue_line(
+        "markers", "nvep: requires a moe_ep-enabled install (default)"
+    )
+    config.addinivalue_line("markers", "gpu: requires at least one CUDA GPU")
     config.addinivalue_line("markers", "gpu_2: requires >=2 GPUs")
     config.addinivalue_line("markers", "gpu_4: requires >=4 GPUs")
     config.addinivalue_line("markers", "gpu_8: requires >=8 GPUs")
     config.addinivalue_line("markers", "arch_blackwell: requires sm_100 or sm_103")
+    config.addinivalue_line("markers", "arch_hopper: requires sm_90 (Hopper)")
+    config.addinivalue_line(
+        "markers", "arch_sm120: requires sm_120/sm_121 (Blackwell-consumer)"
+    )
+    config.addinivalue_line(
+        "markers",
+        "long_running: front-load this test file at the start of the parallel CI queue",
+    )
+    config.addinivalue_line(
+        "markers", "solo: run this whole test file alone (memory-heavy)"
+    )
+    config.addinivalue_line(
+        "markers",
+        "shard_group(name): keep marked nodes from one source in one pytest batch",
+    )
 
 
 def pytest_collection_modifyitems(config, items):
     """Skip moe_ep tests on hosts that lack the requisite env / GPUs / arch."""
     nvep_built = False
     try:
-        from flashinfer.moe_ep import available_backends
+        from importlib import import_module
 
-        nvep_built = bool(available_backends())
+        nvep_built = bool(import_module("flashinfer.moe_ep").available_backends())
     except ImportError:
         pass
 
@@ -184,14 +202,44 @@ def pytest_collection_modifyitems(config, items):
         if "nvep" in item.keywords and not nvep_built:
             item.add_marker(
                 pytest.mark.skip(
-                    reason="needs BUILD_NCCL_EP=1 / BUILD_NIXL_EP=1 install"
+                    reason="no moe_ep backend built (EP builds by default; "
+                    "check install log for skipped-backend warnings)"
                 )
             )
+        launched_ranks = int(os.environ.get("WORLD_SIZE", "0"))
         for mk, req in (("gpu_2", 2), ("gpu_4", 4), ("gpu_8", 8)):
-            if mk in item.keywords and ngpu < req:
+            if mk not in item.keywords:
+                continue
+            if "WORLD_SIZE" not in os.environ:
+                # Multi-rank tests must be launched via torchrun (see
+                # tests/moe_ep/run_tests.sh); under plain pytest auto-discovery
+                # (e.g. CI unit-test sweeps) they would hang on dist init.
+                item.add_marker(
+                    pytest.mark.skip(
+                        reason="requires torchrun launch (WORLD_SIZE unset)"
+                    )
+                )
+            elif ngpu < req and launched_ranks < req:
+                # An explicit torchrun with WORLD_SIZE >= req overrides the
+                # physical GPU count: single-GPU sm_12x boxes (RTX/GB10,
+                # DGX-Spark style) run multirank with ranks sharing one GPU
+                # (the sm120 kernel drop's bootstrap maps
+                # local_rank % device_count and supports MEGA_SINGLE_GPU_GLOO).
                 item.add_marker(pytest.mark.skip(reason=f"needs >= {req} GPUs"))
-        if "arch_blackwell" in item.keywords and cc < (10, 0):
-            item.add_marker(pytest.mark.skip(reason="needs sm_100+"))
+        # Exactly the sm_10x family: the sm_100 tree's kernels do not target
+        # Hopper (below) or the consumer sm_11x/sm_12x families (which use
+        # their own kernel trees), so >= would let them collect on hosts
+        # where the kernel cannot compile.
+        if "arch_blackwell" in item.keywords and cc[0] != 10:
+            item.add_marker(pytest.mark.skip(reason="needs sm_100/sm_103"))
+        # Exactly sm_90: the SM90 mega kernels are Hopper-only (Blackwell
+        # hosts use the sm_100 tree's kernels instead).
+        if "arch_hopper" in item.keywords and cc != (9, 0):
+            item.add_marker(pytest.mark.skip(reason="needs sm_90 (Hopper)"))
+        # Exactly the sm_12x family (Blackwell-consumer): the SM120 swap-AB
+        # mega kernel's warp-level MMA path targets sm_120/sm_121 only.
+        if "arch_sm120" in item.keywords and cc[0] != 12:
+            item.add_marker(pytest.mark.skip(reason="needs sm_120/sm_121"))
 
 
 def is_cuda_oom_error_str(e: str) -> bool:
