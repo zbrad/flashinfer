@@ -23,6 +23,19 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${REPO_ROOT}/tuned/env.sh" "${GPU_TUNED_ARG_VARIANT}"
 cd "${REPO_ROOT}"
 
+# tuning-vN = commits on tuned-builds since it diverged from main (i.e.
+# commits ahead of upstream/flashinfer-ai) -- same convention adopted
+# fleet-wide from zbrad/pytorch's tuned/wheel.sh: version.txt's plain
+# semver only moves when upstream bumps it, so on its own it can't say
+# "how much of our own tuned-builds work landed since an earlier wheel
+# was built." flashinfer-python and flashinfer-jit-cache must carry the
+# exact same local version (flashinfer's own _check_jit_cache_version
+# enforces this at import time), so this is computed once and reused for
+# both builds below.
+gpu_tuned_resolve_cuda_home
+TUNED_COMMIT_COUNT="$(git rev-list --count main..HEAD)"
+FLASHINFER_TUNED_LOCAL_VERSION="${GPU_TUNED_VARIANT}.cu${CUDA_VERSION_COMPACT}.tuning-v${TUNED_COMMIT_COUNT}"
+
 echo "=========================================="
 echo "Building flashinfer for ${GPU_TUNED_HW_LABEL} only"
 echo "=========================================="
@@ -66,7 +79,7 @@ print(f"flashinfer {flashinfer.__version__} smoke test OK: output {o.shape} {o.d
 PYEOF
 echo "::endgroup::"
 
-echo "::group::Build flashinfer-python wheel (+${GPU_TUNED_VARIANT} local version) for external consumers, e.g. vllm"
+echo "::group::Build flashinfer-python wheel (+${FLASHINFER_TUNED_LOCAL_VERSION} local version) for external consumers, e.g. vllm"
 # Python-source-only wheel (py3-none-any tag, no compiled CUDA binary) --
 # needed so `import flashinfer` works in another venv. Kernels JIT-compile
 # and cache under ~/.cache/flashinfer/ on first use in that venv's process
@@ -75,7 +88,7 @@ echo "::group::Build flashinfer-python wheel (+${GPU_TUNED_VARIANT} local versio
 # zero-JIT deployment).
 python3 -m pip install --user --upgrade build
 rm -rf "${REPO_ROOT}/dist" "${REPO_ROOT}/build" "${REPO_ROOT}"/*.egg-info
-FLASHINFER_LOCAL_VERSION="${GPU_TUNED_VARIANT}" python3 -m build --wheel --no-isolation "${REPO_ROOT}"
+FLASHINFER_LOCAL_VERSION="${FLASHINFER_TUNED_LOCAL_VERSION}" python3 -m build --wheel --no-isolation "${REPO_ROOT}"
 echo "Built wheel(s):"
 ls -lh "${REPO_ROOT}"/dist/*.whl
 # the wheel build copies licenses/*.txt to the repo root (to avoid a nested
@@ -119,7 +132,7 @@ if [[ "${GPU_TUNED_NEEDS_AOT_JIT_CACHE}" == "true" ]]; then
     export FLASHINFER_AOT_ADD_ACT="${GPU_TUNED_AOT_ADD_ACT}"
     export FLASHINFER_AOT_ADD_MISC="${GPU_TUNED_AOT_ADD_MISC}"
     export FLASHINFER_AOT_ADD_XQA="${GPU_TUNED_AOT_ADD_XQA}"
-    FLASHINFER_LOCAL_VERSION="${GPU_TUNED_VARIANT}" python3 -m build --wheel --no-isolation "${REPO_ROOT}/flashinfer-jit-cache"
+    FLASHINFER_LOCAL_VERSION="${FLASHINFER_TUNED_LOCAL_VERSION}" python3 -m build --wheel --no-isolation "${REPO_ROOT}/flashinfer-jit-cache"
     echo "Built wheel(s):"
     ls -lh "${REPO_ROOT}"/flashinfer-jit-cache/dist/*.whl
     echo "::endgroup::"
