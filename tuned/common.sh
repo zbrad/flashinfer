@@ -213,19 +213,32 @@ gpu_tuned_verify_cccl_version() {
 # greps one constant name (see zbrad/raft's raft_wheel_common.sh, which
 # stamps both libraft and librmm into .raft_build_info regardless of
 # which package is being stamped).
+#
+# Always stamps the exact source commit (git rev-parse --short HEAD, run
+# from the caller's cwd -- every tuned/build.sh|wheel.sh invokes this from
+# REPO_ROOT) in addition to <version>, rather than trusting <version> to
+# carry it. It didn't always: some tuned-builds version schemes embed a
+# git sha in the version string itself (e.g. pytorch's old
+# BASE.dev<date>+git<sha>...), others (e.g. a plain semver, or a
+# tuning-vN commit-count scheme) don't -- a caller passing one of the
+# latter used to leave the stamped binary itself with no way back to the
+# exact commit, unlike its GitHub release title. Auto-detecting here
+# means it can't be forgotten by a caller either way.
 gpu_tuned_embed_build_info() {
     local target="$1" variant="$2" package="$3" version="$4" hw_label="${5:-${2}}" repo_url="${6:-}" section_override="${7:-}"
-    local section tmp
+    local section tmp git_sha
     if [ -n "${section_override}" ]; then
         section="${section_override}"
         [[ "${section}" == .* ]] || section=".${section}"
     else
         section=".$(printf '%s' "${package}" | tr -c 'A-Za-z0-9' '_')_build_info"
     fi
+    git_sha="$(git rev-parse --short HEAD 2>/dev/null)" || git_sha="unknown"
     tmp="$(mktemp)"
     {
         printf '%s-%s build: %s v%s (%s)' "${package}" "${variant}" "${package}" "${version}" "${hw_label}"
         [ -n "${repo_url}" ] && printf ', %s' "${repo_url}"
+        printf ', commit %s' "${git_sha}"
         printf ', built %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     } > "${tmp}"
     objcopy --remove-section "${section}" "${target}" 2>/dev/null || true
@@ -364,4 +377,82 @@ gpu_tuned_publish_release() {
         return 1
     fi
     echo "OK: published ${repo}@${tag} -- https://github.com/${repo}/releases/tag/${tag}"
+}
+
+# gpu_tuned_verify_venv <venv-dir> <repo-root> — sanity-checks an existing
+# venv before build.sh/wheel.sh reuse it, instead of silently building on
+# top of corruption. Catches two concrete failure modes hit in practice: a
+# venv effectively copied from another repo (bin/pip's shebang -- an
+# absolute path baked in at creation by both `python3 -m venv` and `uv
+# venv` alike -- resolves outside this venv entirely), and a stray
+# <repo-root>/*.egg-info or build/**/CMakeCache.txt left pointing at a
+# different repo, either of which silently shadows/misdirects a real
+# build. Does not check pyvenv.cfg's `command=` key -- `uv venv` doesn't
+# write one, only `python3 -m venv` does.
+gpu_tuned_verify_venv() {
+    local venv_dir="$1" repo_root="$2"
+    local pip_shebang
+    pip_shebang="$(head -1 "${venv_dir}/bin/pip" 2>/dev/null | sed -n 's/^#!//p')"
+    if [[ -z "${pip_shebang}" || "${pip_shebang}" != "${venv_dir}"/* ]]; then
+        echo "ERROR: gpu_tuned_verify_venv: ${venv_dir}/bin/pip's shebang ('${pip_shebang:-<unreadable>}') does not resolve inside ${venv_dir} -- this venv looks copied from another repo. Delete and rebuild: rm -rf ${venv_dir}" >&2
+        return 1
+    fi
+
+    local stray_egg
+    stray_egg="$(find "${repo_root}" -maxdepth 1 -name '*.egg-info' 2>/dev/null | head -1)"
+    if [[ -n "${stray_egg}" ]]; then
+        echo "ERROR: gpu_tuned_verify_venv: stray ${stray_egg} in repo root can shadow the real installed .dist-info (importlib.metadata resolves cwd-relative egg-info first). Delete it: rm -rf ${stray_egg}" >&2
+        return 1
+    fi
+
+    local cmake_cache cached_home
+    while IFS= read -r cmake_cache; do
+        cached_home="$(sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' "${cmake_cache}")"
+        if [[ -n "${cached_home}" && "${cached_home}" != "${repo_root}" ]]; then
+            echo "ERROR: gpu_tuned_verify_venv: ${cmake_cache}'s CMAKE_HOME_DIRECTORY (${cached_home}) does not match this repo (${repo_root}) -- this build/ dir looks copied from another repo. Delete it: rm -rf ${repo_root}/build" >&2
+            return 1
+        fi
+    done < <(find "${repo_root}/build" -name 'CMakeCache.txt' 2>/dev/null)
+
+    return 0
+}
+
+# gpu_tuned_audit_pinned <pip-cmd> <pkg>=<expected-local-tag> [...] —
+# prints each package's installed version, and WARNs (not fatal -- callers
+# decide whether to treat it as an error) if a tuned build's local-version
+# tag isn't present in what's actually installed, e.g. an untuned
+# torch/flashinfer wheel silently shadowing the tuned one via a later,
+# unrelated pip install. <pip-cmd> is the pip to inspect -- a venv's
+# bin/pip, or `python3 -m pip --user` for flashinfer's shared ~/.local.
+gpu_tuned_audit_pinned() {
+    local pip_cmd="$1"
+    shift
+    local spec pkg tag installed
+    for spec in "$@"; do
+        pkg="${spec%%=*}"
+        tag="${spec#*=}"
+        installed="$(${pip_cmd} show "${pkg}" 2>/dev/null | sed -n 's/^Version: //p')"
+        if [[ -z "${installed}" ]]; then
+            echo "  ${pkg}: not installed"
+        elif [[ "${installed}" != *"${tag}"* ]]; then
+            echo "WARNING: gpu_tuned_audit_pinned: ${pkg} ${installed} does not carry expected tag '${tag}' -- a non-tuned build may have silently replaced it." >&2
+        else
+            echo "  ${pkg}: ${installed} (OK)"
+        fi
+    done
+}
+
+# gpu_tuned_audit_stray <pip-cmd> <pkg> [...] — WARNs (not fatal) if any of
+# the named packages are installed at all. For packages known to cause
+# trouble just by being present, not because of a version conflict, but
+# because they aren't part of this fleet's actual dependency chain and can
+# trip an unrelated runtime version check (see: flashinfer-cubin).
+gpu_tuned_audit_stray() {
+    local pip_cmd="$1"
+    shift
+    local pkg installed
+    for pkg in "$@"; do
+        installed="$(${pip_cmd} show "${pkg}" 2>/dev/null | sed -n 's/^Version: //p')"
+        [[ -n "${installed}" ]] && echo "WARNING: gpu_tuned_audit_stray: ${pkg} ${installed} is installed but isn't part of this fleet's dependency chain -- consider: ${pip_cmd} uninstall ${pkg}" >&2
+    done
 }
