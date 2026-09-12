@@ -43,8 +43,15 @@ fi
 # script assumes it did.
 FULL_VERSION="$(gpu_tuned_wheel_version "${MAIN_WHEEL}" flashinfer_python)" || exit 1
 GIT_SHA="$(git rev-parse --short HEAD)"
-CUDA_TAG="$(echo "${FULL_VERSION}" | grep -oE 'cu[0-9]+' | head -1)"
-TUNING_LABEL="$(echo "${FULL_VERSION}" | grep -oE 'tuning-v[0-9]+' | head -1)"
+# FULL_VERSION is parsed back from the wheel's own FILENAME (above), where
+# PEP 440/wheel naming already normalized every "-" in the local version
+# segment to "." -- so this matches "tuning.v28", not "tuning-v28". `|| true`
+# on both: grep exits 1 on no match (e.g. a wheel built before the
+# tuning-vN scheme existed), and every caller here runs under
+# `set -o pipefail` -- without it, a no-match would abort the script
+# before the very next line's own graceful empty-value handling ever runs.
+CUDA_TAG="$(echo "${FULL_VERSION}" | grep -oE 'cu[0-9]+' | head -1 || true)"
+TUNING_LABEL="$(echo "${FULL_VERSION}" | grep -oE 'tuning\.v[0-9]+' | head -1 || true)"
 [[ -z "${CUDA_TAG}" ]] && { echo "ERROR: could not determine CUDA tag from wheel version ${FULL_VERSION}." >&2; exit 1; }
 
 ASSETS=("${MAIN_WHEEL}#$(basename "${MAIN_WHEEL}")")
