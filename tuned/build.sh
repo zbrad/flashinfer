@@ -153,6 +153,36 @@ if [[ "${GPU_TUNED_NEEDS_AOT_JIT_CACHE}" == "true" ]]; then
     ls -lh "${REPO_ROOT}"/flashinfer-jit-cache/dist/*.whl
     echo "::endgroup::"
 
+    echo "::group::Stamp build-info into every AOT-compiled kernel .so"
+    # Same proven-safe pattern as pytorch/flash-attention/flash-attention-vllm's
+    # wheel.sh this session: python -m build's own install pass isn't
+    # guaranteed to carry forward a stamp added to a pre-build .so, so stamp
+    # the wheel's own contents post-build, verify each one survived, then
+    # repack (regenerates RECORD correctly, unlike a raw zip edit). This
+    # wheel packages many independently-compiled kernel .so files (one per
+    # AOT-covered op signature, see GPU_TUNED_AOT_* above) rather than one
+    # primary binary -- stamp and verify all of them, not just one, so any
+    # individual kernel's provenance is checkable on its own later.
+    JIT_WHEEL="$(find "${REPO_ROOT}/flashinfer-jit-cache/dist" -maxdepth 1 -name 'flashinfer_jit_cache-*.whl' | head -1)"
+    [[ -z "${JIT_WHEEL}" ]] && { echo "ERROR: no flashinfer-jit-cache wheel found to stamp." >&2; exit 1; }
+    JIT_VERSION="$(gpu_tuned_wheel_version "${JIT_WHEEL}" flashinfer_jit_cache)" || exit 1
+    python3 -m pip install --user --upgrade wheel >/dev/null
+    UNPACK_DIR="$(mktemp -d)"
+    python3 -m wheel unpack "${JIT_WHEEL}" --dest "${UNPACK_DIR}"
+    mapfile -t JIT_SOS < <(find "${UNPACK_DIR}" -name '*.so')
+    [[ ${#JIT_SOS[@]} -eq 0 ]] && { echo "ERROR: no .so files found inside ${JIT_WHEEL}." >&2; exit 1; }
+    echo "Stamping ${#JIT_SOS[@]} compiled kernel(s) with build-info"
+    for so in "${JIT_SOS[@]}"; do
+        embed_build_info "${so}" "${GPU_TUNED_VARIANT}" "flashinfer_jit_cache" "${JIT_VERSION}" "${GPU_TUNED_HW_LABEL}"
+        gpu_tuned_verify_build_info "${so}" "flashinfer_jit_cache" "${JIT_VERSION}" "flashinfer_build_info" >/dev/null
+    done
+    echo "OK: all ${#JIT_SOS[@]} kernel(s) carry a verified build-info stamp"
+    rm -f "${JIT_WHEEL}"
+    UNPACKED_CONTENT_DIR="$(find "${UNPACK_DIR}" -maxdepth 1 -mindepth 1 -type d)"
+    python3 -m wheel pack "${UNPACKED_CONTENT_DIR}" --dest-dir "${REPO_ROOT}/flashinfer-jit-cache/dist"
+    rm -rf "${UNPACK_DIR}"
+    echo "::endgroup::"
+
     echo ""
     echo "Build complete."
     echo "To use this build from vllm's venv (no JIT at runtime):"

@@ -37,3 +37,17 @@ source "${GPU_TUNED_SELF_DIR}/common.sh" || return 1 2>/dev/null || exit 1
 gpu_tuned_assert_compute_cap "${GPU_TUNED_COMPUTE_CAP}" "${GPU_TUNED_HW_LABEL}" || return 1 2>/dev/null || exit 1
 
 export FLASHINFER_CUDA_ARCH_LIST="${GPU_TUNED_CUDA_ARCH}"
+
+# embed_build_info <so_path> <variant> <package> <version> [hw_label] —
+# thin wrapper over gpu_tuned_embed_build_info (common.sh) that pins the
+# section name to .flashinfer_build_info, same convention as every other
+# tuned-builds repo's own embed_build_info wrapper (each pins its own
+# name rather than relying on the base function's package-derived
+# default, so a caller passing a different <package> string per call --
+# e.g. this repo's own "flashinfer_jit_cache" -- still lands in one
+# predictable, greppable section name).
+embed_build_info() {
+    local so_path="$1" variant="$2" package="$3" version="$4" hw_label="$5"
+    gpu_tuned_embed_build_info "${so_path}" "${variant}" "${package}" "${version}" \
+        "${hw_label}" "https://github.com/zbrad/flashinfer" "flashinfer_build_info"
+}
