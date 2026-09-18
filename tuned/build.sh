@@ -23,7 +23,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${REPO_ROOT}/tuned/env.sh" "${GPU_TUNED_ARG_VARIANT}"
 cd "${REPO_ROOT}"
 
-# tuning-vN = commits on tuned-builds since it diverged from main (i.e.
+# tuning.N = commits on tuned-builds since it diverged from main (i.e.
 # commits ahead of upstream/flashinfer-ai) -- same convention adopted
 # fleet-wide from zbrad/pytorch's tuned/wheel.sh: version.txt's plain
 # semver only moves when upstream bumps it, so on its own it can't say
@@ -34,7 +34,7 @@ cd "${REPO_ROOT}"
 # both builds below.
 gpu_tuned_resolve_cuda_home
 TUNED_COMMIT_COUNT="$(git rev-list --count main..HEAD)"
-FLASHINFER_TUNED_LOCAL_VERSION="${GPU_TUNED_VARIANT}.cu${CUDA_VERSION_COMPACT}.tuning-v${TUNED_COMMIT_COUNT}"
+FLASHINFER_TUNED_LOCAL_VERSION="$(gpu_tuned_local_version "${GPU_TUNED_VARIANT}" "${CUDA_VERSION_COMPACT}" "${TUNED_COMMIT_COUNT}")"
 
 echo "=========================================="
 echo "Building flashinfer for ${GPU_TUNED_HW_LABEL} only"

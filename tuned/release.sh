@@ -27,7 +27,7 @@ cd "${REPO_ROOT}"
 VERSION="$(tr -d '\r' < "${REPO_ROOT}/version.txt")"
 
 # Wildcard after ${GPU_TUNED_VARIANT} (not a literal "-") -- build.sh's
-# FLASHINFER_LOCAL_VERSION now carries variant.cuTAG.tuning-vN, not just
+# FLASHINFER_LOCAL_VERSION now carries variant.cuTAG.tuning.N, not just
 # the bare variant, so the wheel filename has more after it than a single
 # "-cp314-..." tag suffix.
 MAIN_WHEEL="$(find "${REPO_ROOT}/dist" -maxdepth 1 -name "flashinfer_python-${VERSION}+${GPU_TUNED_VARIANT}*.whl" | head -1)"
@@ -37,21 +37,17 @@ if [[ -z "${MAIN_WHEEL}" ]]; then
     exit 1
 fi
 
-# Read the full local version (variant, cuda tag, tuning-vN) back from the
+# Read the full local version (variant, cuda tag, tuning.N) back from the
 # wheel filename rather than re-deriving cuda tag independently via nvcc --
 # avoids any drift between what build.sh actually baked in and what this
 # script assumes it did.
 FULL_VERSION="$(gpu_tuned_wheel_version "${MAIN_WHEEL}" flashinfer_python)" || exit 1
 GIT_SHA="$(git rev-parse --short HEAD)"
-# FULL_VERSION is parsed back from the wheel's own FILENAME (above), where
-# PEP 440/wheel naming already normalized every "-" in the local version
-# segment to "." -- so this matches "tuning.v28", not "tuning-v28". `|| true`
-# on both: grep exits 1 on no match (e.g. a wheel built before the
-# tuning-vN scheme existed), and every caller here runs under
-# `set -o pipefail` -- without it, a no-match would abort the script
-# before the very next line's own graceful empty-value handling ever runs.
+# FULL_VERSION is parsed back from the wheel's own FILENAME, i.e. PEP 440's
+# normalized form. build.sh emits that same form (gpu_tuned_local_version), so
+# it round-trips; see tuned-common docs/VERSIONING.md.
 CUDA_TAG="$(echo "${FULL_VERSION}" | grep -oE 'cu[0-9]+' | head -1 || true)"
-TUNING_LABEL="$(echo "${FULL_VERSION}" | grep -oE 'tuning\.v[0-9]+' | head -1 || true)"
+TUNING_LABEL="$(gpu_tuned_tuning_label "${FULL_VERSION}")"
 [[ -z "${CUDA_TAG}" ]] && { echo "ERROR: could not determine CUDA tag from wheel version ${FULL_VERSION}." >&2; exit 1; }
 
 ASSETS=("${MAIN_WHEEL}#$(basename "${MAIN_WHEEL}")")
@@ -75,7 +71,7 @@ fi
 # version / tuned build identity / traceability, same shape as every
 # other tuned-builds repo's release.sh|wheel.sh this session.
 RELEASE_TAG="v${FULL_VERSION}"
-RELEASE_TITLE="flashinfer ${VERSION} — ${GPU_TUNED_VARIANT} ${TUNING_LABEL:-(pre-tuning-v build)} (${CUDA_TAG}, ${GIT_SHA})"
+RELEASE_TITLE="flashinfer ${VERSION} — ${GPU_TUNED_VARIANT} ${TUNING_LABEL:-(pre-tuning build)} (${CUDA_TAG}, ${GIT_SHA})"
 
 echo "===================================================="
 echo "flashinfer ${GPU_TUNED_HW_LABEL} Release"
