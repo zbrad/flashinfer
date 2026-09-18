@@ -559,8 +559,8 @@ class MnnvlMemory:  # type: ignore[no-redef]
                 if pynvml.nvmlDeviceGetNvLinkCapability(
                     handle, link_idx, pynvml.NVML_NVLINK_CAP_P2P_SUPPORTED
                 ):
-                    is_active = pynvml.nvmlDeviceGetNvLinkState(handle, link_idx)
                     available_links += 1
+                    is_active = pynvml.nvmlDeviceGetNvLinkState(handle, link_idx)
                     if is_active:
                         active_links += 1
             except (pynvml.NVMLError_NotSupported, pynvml.NVMLError_InvalidArgument):
@@ -600,8 +600,8 @@ def is_mnnvl_fabric_supported(device_idx: int) -> bool:
         pynvml.nvmlDeviceGetGpuFabricInfoV(handle, ctypes.byref(fabric_info))
         return (
             fabric_info.state >= pynvml.NVML_GPU_FABRIC_STATE_COMPLETED
-            # A binary UUID may start with zero; only an all-zero UUID is absent.
-            and any(fabric_info.clusterUuid)
+            and fabric_info.clusterUuid
+            and fabric_info.clusterUuid[0] != 0
         )
     finally:
         pynvml.nvmlShutdown()

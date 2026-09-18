@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Hopper FP8 token sweep: heuristic by default, exhaustive on request.
+# Fixed P02/P03 Hopper FP8 token-sweep entry point.
 
 set -euo pipefail
 

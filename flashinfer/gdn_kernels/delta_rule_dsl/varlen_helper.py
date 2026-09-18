@@ -190,7 +190,9 @@ def choose_cp_chunk_len_host(
 
 
 @cute.jit
-def chunk_bound(seq_idx: cutlass.Int32, total, chunk_size) -> cutlass.Int32:
+def chunk_bound(
+    seq_idx: cutlass.Int32, total, chunk_size: cutlass.Int32
+) -> cutlass.Int32:
     m = seq_idx
     if total < m:
         m = cutlass.Int32(total)
@@ -198,11 +200,8 @@ def chunk_bound(seq_idx: cutlass.Int32, total, chunk_size) -> cutlass.Int32:
 
 
 @cute.jit
-def chunks_for_len(seq_len: cutlass.Int32, chunk_size) -> cutlass.Int32:
-    chunk_size_value = chunk_size
-    if cutlass.const_expr(isinstance(chunk_size, cute.FastDivmodDivisorV2)):
-        chunk_size_value = chunk_size.divisor
-    return (seq_len + chunk_size_value - cutlass.Int32(1)) // chunk_size
+def chunks_for_len(seq_len: cutlass.Int32, chunk_size: cutlass.Int32) -> cutlass.Int32:
+    return (seq_len + chunk_size - cutlass.Int32(1)) // chunk_size
 
 
 @cute.jit
@@ -234,7 +233,7 @@ def varlen_chunk_idx(
     seq_idx: cutlass.Int32,
     tok_idx_start,
     chunk_idx_in_seq: cutlass.Int32,
-    chunk_size,
+    chunk_size: cutlass.Int32,
 ) -> cutlass.Int32:
     return chunk_bound(seq_idx, tok_idx_start, chunk_size) + chunk_idx_in_seq
 

@@ -115,9 +115,8 @@ def parse_quantization_args(line, parser):
         type=str,
         required=False,
         default="bfloat16",
-        choices=["bfloat16", "float16", "float32"],
-        help="Data type of the input tensor. float32 is supported by "
-        "mxfp8_quantize with the cute-dsl backend only.",
+        choices=["bfloat16", "float16"],
+        help="Data type of the input tensor.",
     )
     parser.add_argument(
         "--is_sf_swizzled_layout",
@@ -248,17 +247,10 @@ def testMxfp8Quantize(args):
         return res
 
     input_dtype = dtype_str_to_torch_dtype(args.input_dtype)
-    if input_dtype not in [torch.bfloat16, torch.float16, torch.float32]:
+    if input_dtype not in [torch.bfloat16, torch.float16]:
         raise ValueError(
-            f"Unsupported input dtype: {args.input_dtype}. "
-            "Supported dtypes are bfloat16, float16, float32."
+            f"Unsupported input dtype: {args.input_dtype}. Supported dtypes are bfloat16, float16."
         )
-    if input_dtype == torch.float32 and "cuda" in backends:
-        print("[INFO] cuda backend does not support float32 input for mxfp8_quantize")
-        backends = [b for b in backends if b != "cuda"]
-        if len(backends) == 0:
-            print("[ERROR] No backends to test. Exiting.")
-            return res
     ## Done parsing input arguments
 
     ## Prepare input tensors

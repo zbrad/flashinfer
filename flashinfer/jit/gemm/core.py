@@ -28,7 +28,6 @@ from ..core import (
     sm90a_nvcc_flags,
     sm100a_nvcc_flags,
     sm100f_nvcc_flags,
-    sm107a_nvcc_flags,
     current_compilation_context,
 )
 from ..cubin_loader import (
@@ -770,7 +769,7 @@ def gen_trtllm_gen_gemm_module(enable_rubin: bool = False) -> JitSpec:
             "-DTLLM_ENABLE_CUDA",
             f'-DTLLM_GEN_GEMM_CUBIN_PATH=\\"{gemm_path}\\"',
         ]
-        + (sm107a_nvcc_flags if enable_rubin else sm100a_nvcc_flags),
+        + sm100a_nvcc_flags,
         extra_include_paths=[
             gen_root,
             jit_env.FLASHINFER_GEN_SRC_DIR,
@@ -953,7 +952,7 @@ def gen_trtllm_low_latency_gemm_module(enable_rubin: bool = False) -> JitSpec:
             "-DTLLM_ENABLE_CUDA",
             f'-DTLLM_GEN_GEMM_CUBIN_PATH=\\"{gemm_path}\\"',
         ]
-        + (sm107a_nvcc_flags if enable_rubin else sm100a_nvcc_flags),
+        + sm100a_nvcc_flags,
         extra_include_paths=[
             gen_root,
             jit_env.FLASHINFER_GEN_SRC_DIR,

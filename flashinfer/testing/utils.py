@@ -664,8 +664,7 @@ def attention_tb_per_sec(
     num_kv_heads,
     time,
     q_dtype=torch.bfloat16,
-    k_dtype=torch.bfloat16,
-    v_dtype=torch.bfloat16,
+    kv_dtype=torch.bfloat16,
     o_dtype=torch.bfloat16,
 ):
     """
@@ -681,16 +680,15 @@ def attention_tb_per_sec(
         num_kv_heads (int): Number of key and value heads.
         time (float): Execution time in milliseconds.
         q_dtype (torch.dtype): Data type of the query.
-        k_dtype (torch.dtype): Data type of the key.
-        v_dtype (torch.dtype): Data type of the value.
+        kv_dtype (torch.dtype): Data type of the key and value.
         o_dtype (torch.dtype): Data type of the output.
 
     Returns:
         tb_per_sec (float): TB per second for the layer.
     """
     q_bytes = batch_size * qo_seqlen * num_qo_heads * head_dim_qk * q_dtype.itemsize
-    k_bytes = batch_size * kv_seqlen * num_kv_heads * head_dim_qk * k_dtype.itemsize
-    v_bytes = batch_size * kv_seqlen * num_kv_heads * head_dim_vo * v_dtype.itemsize
+    k_bytes = batch_size * kv_seqlen * num_kv_heads * head_dim_qk * kv_dtype.itemsize
+    v_bytes = batch_size * kv_seqlen * num_kv_heads * head_dim_vo * kv_dtype.itemsize
     o_bytes = batch_size * qo_seqlen * num_qo_heads * head_dim_vo * o_dtype.itemsize
     total_bytes = q_bytes + k_bytes + v_bytes + o_bytes
 
@@ -708,8 +706,7 @@ def attention_tb_per_sec_with_actual_seq_lens(
     num_kv_heads,
     time,
     q_dtype=torch.bfloat16,
-    k_dtype=torch.bfloat16,
-    v_dtype=torch.bfloat16,
+    kv_dtype=torch.bfloat16,
     o_dtype=torch.bfloat16,
 ):
     """
@@ -725,8 +722,7 @@ def attention_tb_per_sec_with_actual_seq_lens(
         num_kv_heads (int): Number of key and value heads.
         time (float): Execution time in milliseconds.
         q_dtype (torch.dtype): Data type of the query.
-        k_dtype (torch.dtype): Data type of the key.
-        v_dtype (torch.dtype): Data type of the value.
+        kv_dtype (torch.dtype): Data type of the key and value.
         o_dtype (torch.dtype): Data type of the output.
 
     Returns:
@@ -736,10 +732,10 @@ def attention_tb_per_sec_with_actual_seq_lens(
         torch.sum(actual_seq_lens_q) * num_qo_heads * head_dim_qk * q_dtype.itemsize
     )
     k_bytes = (
-        torch.sum(actual_seq_lens_kv) * num_kv_heads * head_dim_qk * k_dtype.itemsize
+        torch.sum(actual_seq_lens_kv) * num_kv_heads * head_dim_qk * kv_dtype.itemsize
     )
     v_bytes = (
-        torch.sum(actual_seq_lens_kv) * num_kv_heads * head_dim_vo * v_dtype.itemsize
+        torch.sum(actual_seq_lens_kv) * num_kv_heads * head_dim_vo * kv_dtype.itemsize
     )
     o_bytes = (
         torch.sum(actual_seq_lens_q) * num_qo_heads * head_dim_vo * o_dtype.itemsize

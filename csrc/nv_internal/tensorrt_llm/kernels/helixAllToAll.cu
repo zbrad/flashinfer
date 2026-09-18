@@ -454,10 +454,6 @@ __global__ void helixAllToAllKernel(HelixAllToAllParams params) {
       LL128Proto::protoUnpack(shmem, tail, singlePacked128ByteCount, fifoEntry128ByteIndexBase,
                               loaded128ByteCount, laneId);
 
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
-      asm volatile("fence.proxy.async.shared::cta;" : : : "memory");
-      __syncwarp();
-#endif
       // note: fields are already unpacked in shared memory
       s2gAllFields<ALLOW_VARIABLE_FIELD1>(params.recvFields, dataIndex, shmem, laneId);
       // wait for data to be read from shared memory

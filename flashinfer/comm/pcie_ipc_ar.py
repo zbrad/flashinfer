@@ -101,8 +101,6 @@ def get_pcie_ipc_comm_module():
         init=init,
         dispose=dispose,
         all_reduce=all_reduce,
-        memop_supported=module.pcie_ipc_memop_supported,
-        set_memop_enabled=module.pcie_ipc_set_memop_enabled,
     )
 
 
@@ -206,7 +204,6 @@ class PcieIpcAllReduceWorkspace:
         self.max_numel = max_numel
         self.max_blocks = max_blocks
         self.profile = ""
-        self.memop_supported = False
         self.profile_reason = ""
         # Resolved launch configurations, keyed exactly. Consulted before any
         # AutoTuner call because even a pure cache lookup there takes a global
@@ -273,7 +270,6 @@ class PcieIpcAllReduceWorkspace:
             self.profile = decision.profile
             self.profile_reason = decision.reason
             module = get_pcie_ipc_comm_module()
-            local_memop_supported = bool(module.memop_supported())
             nbytes = module.workspace_size(
                 self.world_size, max_numel, self.elem_size, max_blocks
             )
@@ -281,16 +277,7 @@ class PcieIpcAllReduceWorkspace:
             nbytes = 0
             self._joint_check({"error": f"{type(e).__name__}: {e}"}, "preparing")
             raise  # unreachable: _joint_check raises on every rank
-        # Carry eligibility in the existing preparation exchange. Mixed groups
-        # agree on the original protocol without adding a collective to it.
-        prepared = self._joint_check(
-            {"error": None, "memop_supported": local_memop_supported},
-            "preparing",
-            require_identical=False,
-        )
-        self.memop_supported = self.world_size in (4, 8) and all(
-            entry["memop_supported"] for entry in prepared
-        )
+        self._joint_check({"error": None}, "preparing")
 
         # --- stage 3: allocate and share, then bind --------------------------
         # NOTE: create_shared_buffer() runs its own all_gather_object and
@@ -303,8 +290,6 @@ class PcieIpcAllReduceWorkspace:
             self._handle = module.init(
                 self._ipc_ptrs, self.rank, max_numel, self.elem_size, max_blocks
             )
-            if self.memop_supported:
-                module.set_memop_enabled(self._handle, True)
             # init() zeroes this rank's slab; no peer may push into it until
             # every rank has done so.
             torch.cuda.synchronize(self.device)
@@ -330,15 +315,11 @@ class PcieIpcAllReduceWorkspace:
             raise
         dist.barrier(group=group)
 
-    def _joint_check(
-        self, local: dict, what: str, *, require_identical: bool = True
-    ) -> List[dict]:
+    def _joint_check(self, local: dict, what: str) -> None:
         """Gather per-rank outcomes and fail the whole group, or none of it.
 
         Raises the same error on every rank, so the caller can rely on all
-        ranks taking the same branch afterwards. Capability outcomes may differ
-        when require_identical is false; callers receive the successful entries
-        and choose one protocol for the whole group.
+        ranks taking the same branch afterwards.
         """
         gathered: List[Optional[dict]] = [None] * self.world_size
         dist.all_gather_object(gathered, local, group=self.group)
@@ -351,16 +332,13 @@ class PcieIpcAllReduceWorkspace:
         mismatched = {
             key: [g[key] for g in entries]
             for key in local
-            if require_identical
-            and key != "error"
-            and len({repr(g[key]) for g in entries}) > 1
+            if key != "error" and len({repr(g[key]) for g in entries}) > 1
         }
         if mismatched:
             raise ValueError(
                 "every rank must build the workspace with identical arguments, "
                 f"but these differ across the group: {mismatched}"
             )
-        return entries
 
     @property
     def handle(self) -> int:
@@ -488,11 +466,7 @@ class PcieIpcAllReduceWorkspace:
         # Settled against the loaded keys, where the answer is known, rather
         # than inferred from a miss later.
         self._tuned_configs_loaded = exists and cache_covers_workspace(
-            self.world_size,
-            self.profile,
-            self.max_blocks,
-            self.max_numel,
-            self.memop_supported,
+            self.world_size, self.profile, self.max_blocks, self.max_numel
         )
         self._joint_check(
             {

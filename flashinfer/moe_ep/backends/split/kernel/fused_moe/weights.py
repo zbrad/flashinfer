@@ -75,11 +75,12 @@ def materialize_fused_moe_weights(
         CuteDslConfig,
         MoEWeightPack as FusedMoEWeightPack,
         QuantFormat,
+        QuantVariant,
         TrtllmBf16Config,
         TrtllmFp4Config,
     )
 
-    quant = moe_config.quant
+    pair = moe_config.quant.pair
     experts = moe_config.experts
     routing = moe_config.routing
     num_local = experts.local_num_experts or routing.num_experts
@@ -87,9 +88,14 @@ def materialize_fused_moe_weights(
     intermediate = experts.intermediate_size
 
     pack = FusedMoEWeightPack()
+    cute_dsl_prepare_variant = {
+        (QuantFormat.NVFP4, QuantFormat.NVFP4): QuantVariant.NVFP4,
+        (QuantFormat.MXFP4, QuantFormat.MXFP8): QuantVariant.MXFP4,
+        (QuantFormat.NVFP4, QuantFormat.BF16): QuantVariant.W4A16,
+    }
 
     for backend_cfg in moe_config.backend:
-        if quant.pair == (QuantFormat.BF16, QuantFormat.BF16) and isinstance(
+        if pair == (QuantFormat.BF16, QuantFormat.BF16) and isinstance(
             backend_cfg, TrtllmBf16Config
         ):
             g1, g2 = _block_major_k_weights(weights.w13, weights.w2)
@@ -102,7 +108,7 @@ def materialize_fused_moe_weights(
             )
             return pack
 
-        if quant.pair == (QuantFormat.NVFP4, QuantFormat.NVFP4) and isinstance(
+        if pair == (QuantFormat.NVFP4, QuantFormat.NVFP4) and isinstance(
             backend_cfg, TrtllmFp4Config
         ):
             view = TrtllmFp4Config.prepare_weights(
@@ -117,15 +123,12 @@ def materialize_fused_moe_weights(
             pack.prepare_for("trtllm_fp4_routed", view)
             return pack
 
-        if quant.pair in (
-            (QuantFormat.NVFP4, QuantFormat.NVFP4),
-            (QuantFormat.MXFP4, QuantFormat.MXFP8),
-            (QuantFormat.NVFP4, QuantFormat.BF16),
-        ) and isinstance(backend_cfg, CuteDslConfig):
+        prepare_variant = cute_dsl_prepare_variant.get(pair)
+        if prepare_variant is not None and isinstance(backend_cfg, CuteDslConfig):
             view = CuteDslConfig.prepare_weights(
                 weights.w13,
                 weights.w2,
-                quant=quant,
+                variant=prepare_variant,
                 num_local_experts=num_local,
                 hidden_size=hidden,
                 intermediate_size=intermediate,
@@ -136,6 +139,7 @@ def materialize_fused_moe_weights(
             return pack
 
     raise ValueError(
-        f"No fused_moe backend in MoEConfig matches quant {quant!r}. "
+        f"No fused_moe backend in MoEConfig matches quant pair "
+        f"weight={pair[0].name}, activation={pair[1].name}. "
         f"Configured backends: {[type(c).__name__ for c in moe_config.backend]}"
     )

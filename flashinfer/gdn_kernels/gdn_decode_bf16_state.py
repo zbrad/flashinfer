@@ -47,7 +47,6 @@ import cuda.bindings.driver as cuda
 import torch
 from cutlass.cute.runtime import from_dlpack
 
-from .device_target import gdn_compile_options, gdn_device_target, target_arch
 from .dtype_compat import as_bf16
 from ..jit.cute_dsl_core import build_and_load_cute_dsl_kernel
 from .cute_dsl_cache_naming import make_kernel_name
@@ -2702,11 +2701,13 @@ def _run_wide_vec_t1(
 # ==============================================================================
 # PUBLIC API
 # ==============================================================================
-_BF16_STATE_COMPILE_OPTS = (
-    cute.EnableTVMFFI(True),
-    cute.GenerateLineInfo(True),
-    cute.OptLevel(3),
-)
+# Number of SMs on target GPU (detected dynamically)
+NUM_SMS = torch.cuda.get_device_properties(0).multi_processor_count
+
+# GPU architecture detected once at import time — avoids per-call
+# torch.cuda.get_device_capability() in the hot path.
+_GPU_MAJOR, _ = torch.cuda.get_device_capability(0)
+_USE_PACKED_FMA = _GPU_MAJOR >= 10
 
 
 def gated_delta_rule(
@@ -2853,11 +2854,8 @@ def _bf16_state_kernel_name(variant: str, cache_key: tuple) -> str:
     ``variant`` distinguishes the compiled entry points sharing this module
     ("wide_vec", "wide_vec_t1", "mtp_ilp4"); ``cache_key`` is the in-process
     cache tuple, which already encodes every parameter that affects codegen.
-    Its last component is the compile target, of which only the arch names an
-    artifact.
     """
-    *codegen, target_key = cache_key
-    return make_kernel_name(variant, target_arch(target_key), *codegen)
+    return make_kernel_name(variant, *cache_key)
 
 
 def _dtype_key(
@@ -2873,7 +2871,7 @@ def _dtype_key(
     )
 
 
-def _select_tile_v_for_mtp(B: int, HV: int, V: int, T: int = 1, *, num_sms: int) -> int:
+def _select_tile_v_for_mtp(B: int, HV: int, V: int, T: int = 1) -> int:
     """Select optimal tile_v for the MTP BF16 kernel based on batch size and T.
 
     tile_v must be a multiple of 4 * MTP_ILP4_ROWS (= 16) and divide V=128.
@@ -2885,13 +2883,13 @@ def _select_tile_v_for_mtp(B: int, HV: int, V: int, T: int = 1, *, num_sms: int)
         num_v_tiles = V // tv
         grid_size = B * HV * num_v_tiles
         # Want at least 4 waves for good occupancy
-        if grid_size >= 4 * num_sms:
+        if grid_size >= 4 * NUM_SMS:
             return tv
     return 32  # Minimum tile_v for maximum parallelism
 
 
 def _get_bf16_mtp_config(
-    batch_size: int, seq_len: int, num_v_heads: int, v_dim: int, *, num_sms: int
+    batch_size: int, seq_len: int, num_v_heads: int, v_dim: int
 ) -> tuple:
     """Select ``(tile_v, ilp_rows)`` for the BF16 MTP kernel.
 
@@ -2911,12 +2909,7 @@ def _get_bf16_mtp_config(
     if work_units <= 128:
         # Tiny grid: small tile_v gives more CTAs to fill SMs.
         return min(16, v_dim), 4
-    return (
-        _select_tile_v_for_mtp(
-            batch_size, num_v_heads, v_dim, seq_len, num_sms=num_sms
-        ),
-        4,
-    )
+    return _select_tile_v_for_mtp(batch_size, num_v_heads, v_dim, seq_len), 4
 
 
 # Threshold above which `gated_delta_rule_mtp` dispatches to the wide_vec
@@ -3087,9 +3080,8 @@ def gated_delta_rule_mtp_wide_vec(
         intermediate_states = h0_source[:1, :1, :1]
         effective_disable_final = disable_state_update
 
-    target = gdn_device_target(q.device)
-    stream = cuda.CUstream(torch.cuda.current_stream(device=q.device).cuda_stream)
-    use_packed_fma = target.use_packed_fma
+    stream = cuda.CUstream(torch.cuda.current_stream().cuda_stream)
+    use_packed_fma = _USE_PACKED_FMA
     # Single-pool callers either pass output_state_indices=None (defaults to
     # initial_state_indices below) or pass the same tensor for both. In both
     # cases the kernel can elide write-side base-pointer arithmetic via the
@@ -3196,7 +3188,6 @@ def gated_delta_rule_mtp_wide_vec(
         per_token_pool_scatter,
         per_token_pool_scatter_flat,
         _dtype_key(A_log, dt_bias, initial_state_indices),
-        target.compile_key,
     )
 
     if cache_key not in _compiled_kernels_wide_vec:
@@ -3251,9 +3242,7 @@ def gated_delta_rule_mtp_wide_vec(
             "compiled": build_and_load_cute_dsl_kernel(
                 _CUTE_DSL_MODULE,
                 _bf16_state_kernel_name("wide_vec", cache_key),
-                lambda: cute.compile[
-                    gdn_compile_options(q.device, *_BF16_STATE_COMPILE_OPTS)
-                ](
+                lambda: cute.compile(
                     _run_wide_vec,
                     h_,
                     inter_,
@@ -3289,6 +3278,7 @@ def gated_delta_rule_mtp_wide_vec(
                     per_token_pool_scatter,
                     per_token_pool_scatter_flat,
                     stream,
+                    options="--enable-tvm-ffi --generate-line-info --opt-level 3",
                 ),
                 extra_key_files=(__file__,),
             ),
@@ -3447,9 +3437,8 @@ def gated_delta_rule_t1_wide_vec(
         intermediate_states = h0_source[:1, :1, :1]
         effective_disable_final = disable_state_update
 
-    target = gdn_device_target(q.device)
-    stream = cuda.CUstream(torch.cuda.current_stream(device=q.device).cuda_stream)
-    use_packed_fma = target.use_packed_fma
+    stream = cuda.CUstream(torch.cuda.current_stream().cuda_stream)
+    use_packed_fma = _USE_PACKED_FMA
     # Single-pool callers either pass output_state_indices=None (defaults to
     # initial_state_indices below) or pass the same tensor for both. In both
     # cases the kernel can elide write-side base-pointer arithmetic via the
@@ -3486,7 +3475,6 @@ def gated_delta_rule_t1_wide_vec(
         use_packed_fma,
         same_pool,
         _dtype_key(A_log, dt_bias, initial_state_indices),
-        target.compile_key,
     )
 
     if cache_key not in _compiled_kernels_wide_vec:
@@ -3528,9 +3516,7 @@ def gated_delta_rule_t1_wide_vec(
             "compiled": build_and_load_cute_dsl_kernel(
                 _CUTE_DSL_MODULE,
                 _bf16_state_kernel_name("wide_vec_t1", cache_key),
-                lambda: cute.compile[
-                    gdn_compile_options(q.device, *_BF16_STATE_COMPILE_OPTS)
-                ](
+                lambda: cute.compile(
                     _run_wide_vec_t1,
                     h_,
                     inter_,
@@ -3559,6 +3545,7 @@ def gated_delta_rule_t1_wide_vec(
                     use_packed_fma,
                     same_pool,
                     stream,
+                    options="--enable-tvm-ffi --generate-line-info --opt-level 3",
                 ),
                 extra_key_files=(__file__,),
             ),
@@ -3817,11 +3804,10 @@ def gated_delta_rule_mtp(
     # redirected here). Falls to the ILP=4 MTP path
     # (mtp_ilp4_kernel), which natively supports both single- and
     # split-pool, so the config picker is independent of pool mode.
-    target = gdn_device_target(q.device)
-    tile_v, ilp_rows = _get_bf16_mtp_config(B, T, HV, V, num_sms=target.num_sms)
+    tile_v, ilp_rows = _get_bf16_mtp_config(B, T, HV, V)
 
-    stream = cuda.CUstream(torch.cuda.current_stream(device=q.device).cuda_stream)
-    use_packed_fma = target.use_packed_fma
+    stream = cuda.CUstream(torch.cuda.current_stream().cuda_stream)
+    use_packed_fma = _USE_PACKED_FMA
     # Set same_pool=True when reads and writes alias (single-pool); the
     # kernel then DCEs write-side base-pointer arithmetic.
     same_pool = (
@@ -3872,7 +3858,6 @@ def gated_delta_rule_mtp(
         per_token_pool_scatter,
         per_token_pool_scatter_flat,
         _dtype_key(A_log, dt_bias, initial_state_indices),
-        target.compile_key,
     )
 
     if cache_key not in _compiled_kernels_mtp:
@@ -3927,9 +3912,7 @@ def gated_delta_rule_mtp(
             "compiled": build_and_load_cute_dsl_kernel(
                 _CUTE_DSL_MODULE,
                 _bf16_state_kernel_name("mtp_ilp4", cache_key),
-                lambda: cute.compile[
-                    gdn_compile_options(q.device, *_BF16_STATE_COMPILE_OPTS)
-                ](
+                lambda: cute.compile(
                     run_gdn_decode_bf16state_mtp_ilp4,
                     h_,
                     inter_,
@@ -3964,6 +3947,7 @@ def gated_delta_rule_mtp(
                     per_token_pool_scatter,
                     per_token_pool_scatter_flat,
                     stream,
+                    options="--enable-tvm-ffi --generate-line-info --opt-level 3",
                 ),
                 extra_key_files=(__file__,),
             ),

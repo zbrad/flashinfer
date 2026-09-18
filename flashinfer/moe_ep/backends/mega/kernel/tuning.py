@@ -122,31 +122,24 @@ def finish_sweep(
     return winner
 
 
-def run_tuning(
-    args, tune_one: Callable[[Any, int, int, int], dict], *, pkg: Any = None
-) -> int:
-    """Dist lifecycle + per-bucket sweep loop shared by the cutedsl tuners.
-
-    ``pkg`` is the kernel_src package providing ``init_dist`` /
-    ``finalize_dist`` / ``knob_cache_path`` (default: the SM100
-    ``cutedsl_megamoe`` tree; the SM90 tuner passes its own tree — the two
-    trees' modules cannot be active in one process).
-    """
+def run_tuning(args, tune_one: Callable[[Any, int, int, int], dict]) -> int:
+    """Dist lifecycle + per-bucket sweep loop shared by the cutedsl tuners."""
     import torch
 
-    if pkg is None:
-        from ....kernel_src import cutedsl_megamoe as _default_pkg
+    from ....kernel_src.cutedsl_megamoe import (
+        finalize_dist,
+        init_dist,
+        knob_cache_path,
+    )
 
-        pkg = _default_pkg
-
-    rank, world_size = pkg.init_dist()
+    rank, world_size = init_dist()
     try:
         for max_tokens in args.max_tokens:
             tune_one(args, rank, world_size, max_tokens)
         torch.cuda.synchronize()
     finally:
-        pkg.finalize_dist()
+        finalize_dist()
     if rank == 0:
-        path = pkg.knob_cache_path()
+        path = knob_cache_path()
         print(f"[moe_ep-tune] done; cache: {path or 'DISABLED'}", flush=True)
     return 0

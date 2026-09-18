@@ -41,7 +41,7 @@ import math
 import os
 from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version
-from typing import Optional, Union
+from typing import Optional
 
 import torch
 from cutlass.cute.typing import Float32, Int32
@@ -167,47 +167,6 @@ def _validate_lse(q: torch.Tensor, lse: Optional[torch.Tensor]) -> None:
         raise ValueError("lse must be contiguous")
 
 
-def _prepare_skip_softmax_threshold(
-    skip_softmax_threshold: Optional[Union[float, torch.Tensor]],
-    q: torch.Tensor,
-    batch_size: int,
-) -> Optional[torch.Tensor]:
-    """Validate or expand the per-request e-based skip threshold."""
-    if skip_softmax_threshold is None:
-        return None
-    if isinstance(skip_softmax_threshold, torch.Tensor):
-        if skip_softmax_threshold.dtype != torch.float32:
-            raise ValueError(
-                "skip_softmax_threshold must have dtype torch.float32, got "
-                f"{skip_softmax_threshold.dtype}"
-            )
-        if not skip_softmax_threshold.is_cuda:
-            raise ValueError("skip_softmax_threshold must be a CUDA tensor")
-        if skip_softmax_threshold.device != q.device:
-            raise ValueError("skip_softmax_threshold and q must be on the same device")
-        expected_shape = (batch_size,)
-        if tuple(skip_softmax_threshold.shape) != expected_shape:
-            raise ValueError(
-                f"skip_softmax_threshold must have shape {expected_shape}, got "
-                f"{tuple(skip_softmax_threshold.shape)}"
-            )
-        if not skip_softmax_threshold.is_contiguous():
-            raise ValueError("skip_softmax_threshold must be contiguous")
-        return skip_softmax_threshold
-
-    try:
-        value = float(skip_softmax_threshold)
-    except (TypeError, ValueError) as exc:
-        raise TypeError(
-            "skip_softmax_threshold must be None, a Python float, or a torch.Tensor"
-        ) from exc
-    if not math.isfinite(value) or value < 0:
-        raise ValueError(
-            f"skip_softmax_threshold must be finite and >= 0; got {value!r}"
-        )
-    return torch.full((batch_size,), value, dtype=torch.float32, device=q.device)
-
-
 def _validate_hnd_paged_pool(name: str, pool: torch.Tensor) -> None:
     """Validate the HND inner layout while allowing combined-cache views."""
     if pool.ndim != 4:
@@ -244,7 +203,6 @@ def sm120_fmha_fp8_ragged_prefill(
     lse: Optional[torch.Tensor] = None,
     v_scale: Optional[float] = None,
     enable_pdl: bool = False,
-    skip_softmax_threshold: Optional[Union[float, torch.Tensor]] = None,
 ) -> None:
     """Run SM120 FP8 FMHA on packed contiguous ragged Q/K/V.
 
@@ -279,19 +237,6 @@ def sm120_fmha_fp8_ragged_prefill(
         Scalar multiplier folded into the normalized output. Defaults to 1.
     enable_pdl : bool
         Whether to enable Programmatic Dependent Launch.
-    skip_softmax_threshold : float or torch.Tensor, optional
-        Skip a K/V tile when all rows owned by a compute warp satisfy
-        ``exp((tile_max - running_max) * sm_scale) < threshold``. A Python
-        float applies one static threshold to the whole batch. During CUDA
-        Graph capture its value is fixed in the captured graph. A tensor is
-        the dynamic form: it must be a contiguous CUDA float32 tensor on the
-        same device as ``q`` with shape ``(batch_size,)``. The caller owns its
-        allocation and lifetime, must keep its address stable, and may update
-        values in place between graph replays. Tensor values are required to
-        be finite and non-negative; this content contract is not checked to
-        avoid a device-to-host synchronization. ``None`` selects the dense
-        specialization; every supplied value, including zero, selects the
-        skip-enabled specialization.
     Raises
     ------
     RuntimeError
@@ -309,9 +254,6 @@ def sm120_fmha_fp8_ragged_prefill(
 
     _check_sm120(q.device)
     _validate_lse(q, lse)
-
-    batch_size = cu_seqlens_q.numel() - 1
-    threshold = _prepare_skip_softmax_threshold(skip_softmax_threshold, q, batch_size)
 
     _, Hq, D = q.shape
     _, Hkv, D_k = k.shape
@@ -360,7 +302,6 @@ def sm120_fmha_fp8_ragged_prefill(
         device=q.device,
         with_lse=lse is not None,
         balanced_scheduler=_use_balanced_scheduler(is_causal),
-        enable_skip_softmax=threshold is not None,
     )
 
     if sm_scale is None:
@@ -376,7 +317,6 @@ def sm120_fmha_fp8_ragged_prefill(
         lse,
         scale_log2,
         output_scale,
-        threshold,
         None,
         cu_seqlens_q_i32,
         None,
@@ -407,7 +347,6 @@ def sm120_fmha_fp8_paged_prefill(
     lse: Optional[torch.Tensor] = None,
     v_scale: Optional[float] = None,
     enable_pdl: bool = False,
-    skip_softmax_threshold: Optional[Union[float, torch.Tensor]] = None,
 ) -> None:
     """Run SM120 FP8 FMHA prefill with paged K/V cache.
 
@@ -457,19 +396,6 @@ def sm120_fmha_fp8_paged_prefill(
         Scalar multiplier folded into the normalized output. Defaults to 1.
     enable_pdl : bool
         Whether to enable Programmatic Dependent Launch.
-    skip_softmax_threshold : float or torch.Tensor, optional
-        Skip a K/V tile when all rows owned by a compute warp satisfy
-        ``exp((tile_max - running_max) * sm_scale) < threshold``. A Python
-        float applies one static threshold to the whole batch. During CUDA
-        Graph capture its value is fixed in the captured graph. A tensor is
-        the dynamic form: it must be a contiguous CUDA float32 tensor on the
-        same device as ``q`` with shape ``(batch_size,)``. The caller owns its
-        allocation and lifetime, must keep its address stable, and may update
-        values in place between graph replays. Tensor values are required to
-        be finite and non-negative; this content contract is not checked to
-        avoid a device-to-host synchronization. ``None`` selects the dense
-        specialization; every supplied value, including zero, selects the
-        skip-enabled specialization.
     Raises
     ------
     RuntimeError
@@ -508,7 +434,6 @@ def sm120_fmha_fp8_paged_prefill(
         f"block_tables must be (B, max_pages), got {block_tables.shape}"
     )
     B = block_tables.shape[0]
-    threshold = _prepare_skip_softmax_threshold(skip_softmax_threshold, q, B)
 
     in_ct = _cutlass_dtype(q.dtype)
     out_ct = _cutlass_dtype(o.dtype)
@@ -550,7 +475,6 @@ def sm120_fmha_fp8_paged_prefill(
         device=q.device,
         with_lse=lse is not None,
         balanced_scheduler=_use_balanced_scheduler(is_causal),
-        enable_skip_softmax=threshold is not None,
     )
 
     if sm_scale is None:
@@ -571,7 +495,6 @@ def sm120_fmha_fp8_paged_prefill(
         lse,
         scale_log2,
         output_scale,
-        threshold,
         seqlens_kv_i32,
         cu_seqlens_q_i32,
         block_tables,
@@ -710,7 +633,6 @@ class SM120PrimsBatchPrefillBackend:
             device=self.device,
             with_lse=False,
             balanced_scheduler=_use_balanced_scheduler(causal),
-            enable_skip_softmax=False,
         )
         self._compiled_lse_variants = {False}
 
@@ -784,7 +706,6 @@ class SM120PrimsBatchPrefillBackend:
             device=self.device,
             with_lse=False,
             balanced_scheduler=_use_balanced_scheduler(causal),
-            enable_skip_softmax=False,
         )
         self._compiled_lse_variants = {False}
 
@@ -836,36 +757,30 @@ class SM120PrimsBatchPrefillBackend:
             compile_sm120_fmha_fp8_ragged_kernel,
         )
 
+        common = (
+            self._q_dtype,
+            self._o_dtype,
+            self._num_qo_heads,
+            self._num_kv_heads,
+            self._head_dim,
+            self._causal,
+            128,
+            128,
+        )
         if self._mode == "ragged":
             compile_sm120_fmha_fp8_ragged_kernel(
-                in_dtype=self._q_dtype,
-                out_dtype=self._o_dtype,
-                num_qo_heads=self._num_qo_heads,
-                num_kv_heads=self._num_kv_heads,
-                head_dim=self._head_dim,
-                is_causal=self._causal,
-                kv_tile=128,
-                q_tile=128,
-                device=self.device,
-                with_lse=with_lse,
-                balanced_scheduler=_use_balanced_scheduler(self._causal),
-                enable_skip_softmax=False,
+                *common,
+                self.device,
+                with_lse,
+                _use_balanced_scheduler(self._causal),
             )
         else:
             compile_sm120_fmha_fp8_paged_kernel(
-                in_dtype=self._q_dtype,
-                out_dtype=self._o_dtype,
-                num_qo_heads=self._num_qo_heads,
-                num_kv_heads=self._num_kv_heads,
-                head_dim=self._head_dim,
-                is_causal=self._causal,
-                kv_tile=128,
-                q_tile=128,
-                num_tokens_per_page=self._page_size,
-                device=self.device,
-                with_lse=with_lse,
-                balanced_scheduler=_use_balanced_scheduler(self._causal),
-                enable_skip_softmax=False,
+                *common,
+                self._page_size,
+                self.device,
+                with_lse,
+                _use_balanced_scheduler(self._causal),
             )
         self._compiled_lse_variants.add(with_lse)
 

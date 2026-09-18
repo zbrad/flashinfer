@@ -340,7 +340,9 @@ class SwapABSwigluFp4Fc12SchedExtension(MoESchedExtension):
             f"SwapABSwigluFp4Fc12SchedExtension serialization mismatch: "
             f"idx={idx} len(values)={len(values)}"
         )
-        result = type(self).__new__(type(self))
+        result = SwapABSwigluFp4Fc12SchedExtension.__new__(
+            SwapABSwigluFp4Fc12SchedExtension
+        )
         result.workspace = None
         result.sf_vec_size = self.sf_vec_size  # codegen const passthrough
         result.fc1_done_counter_ptr = new_ptr

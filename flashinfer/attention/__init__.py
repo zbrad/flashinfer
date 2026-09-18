@@ -15,14 +15,9 @@ limitations under the License.
 """
 
 from ._core import *  # noqa: F401,F403
-from ._core import (
-    BatchAttention,
-    BatchAttentionWithAttentionSinkWrapper,
-    BatchPrefillWithCausalBidirectionalRangesWrapper,
-)
+from ._core import BatchAttention, BatchAttentionWithAttentionSinkWrapper
 
 __all__ = [
     "BatchAttention",
     "BatchAttentionWithAttentionSinkWrapper",
-    "BatchPrefillWithCausalBidirectionalRangesWrapper",
 ]

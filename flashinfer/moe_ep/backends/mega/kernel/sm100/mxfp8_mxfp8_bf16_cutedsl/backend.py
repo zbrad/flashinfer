@@ -137,7 +137,8 @@ class Mxfp8CutedslMegaKernelBackend(MegaKernelBackend):
             kind=k.kind,
             gate_up_clamp=_resolve_gate_up_clamp(k),
             activation_clamp=k.activation_clamp,
-            enable_in_kernel_fc2_reduce=k.enable_in_kernel_fc2_reduce,
+            in_kernel_fc2_reduce=k.in_kernel_fc2_reduce,
+            token_back_by_dispatch=k.token_back_by_dispatch,
             knobs=k.knobs if isinstance(k.knobs, dict) else None,
         )
 
@@ -293,7 +294,8 @@ class Mxfp8CutedslMegaKernelBackend(MegaKernelBackend):
             k.intermediate_size,
             k.kind,
             _resolve_gate_up_clamp(k),
-            k.enable_in_kernel_fc2_reduce,
+            k.in_kernel_fc2_reduce,
+            k.token_back_by_dispatch,
             knobs_pool_key(k.knobs),
         )
 

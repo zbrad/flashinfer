@@ -250,18 +250,9 @@ class TmemSoftmaxLocalResource(DecodeGenResourceBase):
             # below use only the SMEM ring for this profile.
             return []
         if self._alloc is None:
-            num_stages = (
-                self.pipeline_config.num_stages
-                if self.pipeline_config is not None
-                else 1
-            )
             self._alloc = TmemAllocation(
                 name=f"{self.name}",
-                # Stage addresses retain the S-column stride so the producer
-                # and consumer can use the same pipeline stage index.  Include
-                # that stride in the allocation for the staged one-inst path.
-                num_columns=(num_stages - 1) * self.cfg.tmem_s_cols
-                + self.cfg.tmem_stats_cols,
+                num_columns=self.cfg.tmem_stats_cols,
             )
         return [self._alloc]
 

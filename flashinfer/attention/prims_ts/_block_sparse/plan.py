@@ -24,11 +24,7 @@ import torch
 
 from flashinfer.utils import ceil_div
 
-from .common import (
-    _SIGNED_INT32_MAX,
-    _block_sparse_proxy_summary_geometry,
-    _num_sparse_pattern_heads,
-)
+from .common import _SIGNED_INT32_MAX, _block_sparse_proxy_summary_geometry
 from .compiler import _get_compiled_block_sparse
 from .config import (
     _BlockSparseStaticProfile,
@@ -122,7 +118,6 @@ class _BlockSparsePlanState:
     # All plan-stream work happens-before run after waiting on this event.
     ready_event: torch.cuda.Event
     ready_stream_handle: int
-    share_pattern_across_kv_heads: bool = False
 
 
 def _allocate_dummy_kv_valid_bits(
@@ -197,9 +192,7 @@ def _build_block_sparse_plan_state(
         assert sparse_format == "bsr" and not use_proxy_routes
     num_rows = (
         static.batch_size
-        * _num_sparse_pattern_heads(
-            static.num_kv_heads, static.share_pattern_across_kv_heads
-        )
+        * static.num_kv_heads
         * ceil_div(static.seq_len_q, static.q_block_size)
     )
     if num_rows > _SIGNED_INT32_MAX:
@@ -222,7 +215,6 @@ def _build_block_sparse_plan_state(
             seq_len_kv=static.seq_len_kv,
             num_qo_heads=static.num_qo_heads,
             num_kv_heads=static.num_kv_heads,
-            share_pattern_across_kv_heads=static.share_pattern_across_kv_heads,
             head_dim=static.head_dim,
             q_block_size=static.q_block_size,
             kv_block_size=static.kv_block_size,
@@ -289,7 +281,6 @@ def _build_block_sparse_plan_state(
         compiled=compiled,
         ready_event=ready_event,
         ready_stream_handle=plan_stream.cuda_stream,
-        share_pattern_across_kv_heads=static.share_pattern_across_kv_heads,
     )
 
 

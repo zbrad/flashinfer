@@ -24,6 +24,5 @@ from ..jit import gen_cudnn_fmha_module
 def get_cudnn_fmha_gen_module():
     mod = gen_cudnn_fmha_module()
     op = mod.build_and_load()
-    for library_path in mod.get_library_paths():
-        setup_cubin_loader(library_path)
+    setup_cubin_loader(mod.get_library_path())
     return op

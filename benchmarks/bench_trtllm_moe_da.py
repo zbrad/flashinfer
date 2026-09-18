@@ -20,8 +20,7 @@ import torch
 
 from flashinfer.autotuner import autotune
 from flashinfer.fused_moe import (
-    QuantConfig,
-    QuantFormat,
+    QuantVariant,
     TrtllmBf16Config,
     TrtllmFp4Config,
     TrtllmFp8BlockConfig,
@@ -203,21 +202,17 @@ def _prepare_precision(name: str, shape: BenchmarkShape) -> PreparedPrecision:
     # Quantize once outside timing, then bind a closure to the exact user-facing dtype ABI.
     if name in ("nvfp4", "mxfp4", "w4a16"):
         variant = {
-            "nvfp4": QuantConfig(
-                weight=QuantFormat.NVFP4, activation=QuantFormat.NVFP4
-            ),
-            "mxfp4": QuantConfig(
-                weight=QuantFormat.MXFP4, activation=QuantFormat.MXFP8
-            ),
-            "w4a16": QuantConfig(weight=QuantFormat.MXFP4, activation=QuantFormat.BF16),
+            "nvfp4": QuantVariant.NVFP4,
+            "mxfp4": QuantVariant.MXFP4,
+            "w4a16": QuantVariant.W4A16,
         }[name]
         hidden_q, hidden_scale = TrtllmFp4Config.prepare_activations(
-            hidden, quant=variant
+            hidden, variant=variant
         )
         view = TrtllmFp4Config.prepare_weights(
             w1,
             w2,
-            quant=variant,
+            variant=variant,
             num_local_experts=shape.local_num_experts,
             hidden_size=shape.hidden_size,
             intermediate_size=shape.intermediate_size,
@@ -310,19 +305,15 @@ def _prepare_precision(name: str, shape: BenchmarkShape) -> PreparedPrecision:
 
     elif name in ("fp8_block", "mxfp8"):
         variant = (
-            QuantConfig(
-                weight=QuantFormat.DeepSeekFp8, activation=QuantFormat.DeepSeekFp8
-            )
-            if name == "fp8_block"
-            else QuantConfig(weight=QuantFormat.MXFP8, activation=QuantFormat.MXFP8)
+            QuantVariant.DeepSeekFp8 if name == "fp8_block" else QuantVariant.MxFp8
         )
         hidden_q, hidden_scale = TrtllmFp8BlockConfig.prepare_activations(
-            hidden, quant=variant
+            hidden, variant=variant
         )
         view = TrtllmFp8BlockConfig.prepare_weights(
             w1,
             w2,
-            quant=variant,
+            variant=variant,
             num_local_experts=shape.local_num_experts,
             hidden_size=shape.hidden_size,
             intermediate_size=shape.intermediate_size,

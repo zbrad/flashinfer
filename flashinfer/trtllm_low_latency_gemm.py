@@ -73,8 +73,7 @@ def get_trtllm_low_latency_gemm_module():
 def _get_trtllm_low_latency_gemm_module_impl(enable_rubin: bool):
     mod = gen_trtllm_low_latency_gemm_module(enable_rubin=enable_rubin)
     op = mod.build_and_load()
-    for library_path in mod.get_library_paths():
-        setup_cubin_loader(str(library_path))
+    setup_cubin_loader(str(mod.get_library_path()))
 
     class TrtllmLowLatencyGemmRunner(TunableRunner):
         def get_valid_tactics(
