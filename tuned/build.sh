@@ -33,7 +33,7 @@ cd "${REPO_ROOT}"
 # enforces this at import time), so this is computed once and reused for
 # both builds below.
 gpu_tuned_resolve_cuda_home
-TUNED_COMMIT_COUNT="$(git rev-list --count main..HEAD)"
+TUNED_COMMIT_COUNT="$(gpu_tuned_tuning_count)"
 FLASHINFER_TUNED_LOCAL_VERSION="$(gpu_tuned_local_version "${GPU_TUNED_VARIANT}" "${CUDA_VERSION_COMPACT}" "${TUNED_COMMIT_COUNT}")"
 
 echo "=========================================="
