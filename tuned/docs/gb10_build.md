@@ -13,32 +13,34 @@ runtime JIT compilation**.
 Run it with:
 
 ```bash
-bash tuned/build.sh gb10
+CUDA_TAG=cu134 bash tuned/build.sh gb10
 ```
 
-The script aborts if `nvidia-smi --query-gpu=compute_cap` isn't `12.1`, so
-it's safe to run only on the intended hardware.
+The script aborts if the host is not aarch64 or `nvidia-smi --query-gpu=compute_cap` is not `12.1`, so it
+is safe to run only on the intended hardware. `CUDA_TAG` (or `CUDA_VER=13.4`) is required: there is no
+default toolkit, and gb10 builds are `cu134` only because the pinned torch wheel exists for cu134 only.
 
-## What the script produces
+The stages, each a separate script (docs/ARCHITECTURE.md B3), all working in `tuned/build/<cuda-tag>/`:
 
-Three things, in order:
+```
+build.sh -> full_test.sh -> package.sh -> smoke_test.sh -> (review and commit the notes) -> release.sh -> publish.sh
+```
 
-1. **Editable install** of `flashinfer-python` into the local dev environment
-   (`pip install --no-build-isolation -e .`) — this is what this repo's own
-   dev loop and the smoke test use. Kernels still JIT-compile lazily here.
-2. **`flashinfer-python` wheel** at `dist/flashinfer_python-*+gb10-*.whl`.
-   This wheel carries Python source + `csrc/`/`include/` only — no compiled
-   CUDA binary (confirmed by its `py3-none-any` tag). It exists so
-   `import flashinfer` works in another venv (e.g. vLLM's).
-3. **`flashinfer-jit-cache` wheel** at
-   `flashinfer-jit-cache/dist/flashinfer_jit_cache-*+gb10-*.whl`. This is the
-   actual GB10 binary: AOT-compiled `.so` files for every kernel variant in
+## What the build produces
+
+Into `tuned/build/<cuda-tag>/wheel/`, unstamped, both with the same local version
+`+gb10.cu134.<YYYYMMDD>[.<seq>]` (the date is the UTC commit date of HEAD; the sequence is the lowest unused tag on
+origin; flashinfer's own `_check_jit_cache_version` refuses a pair whose versions differ):
+
+1. **`flashinfer_python-*.whl`** (`py3-none-any`): Python source plus `csrc/`/`include/`, no compiled CUDA
+   binary. It exists so `import flashinfer` works in another venv (e.g. vLLM's).
+2. **`flashinfer_jit_cache-*.whl`**: the actual GB10 binary, AOT-compiled `.so` files for every kernel variant in
    the filtered config below.
 
-Both wheels are tagged with the `+gb10` local version
-(`FLASHINFER_LOCAL_VERSION=gb10`), following the same convention
-`.github/workflows/release.yml` uses for CUDA version suffixes (e.g.
-`+cu128`).
+It also writes `release-label` and `build-commit` there. Nothing is installed outside the toolkit's own venv
+(`tuned/build/<cuda-tag>/venv`); the old build installed flashinfer editable into `~/.local`, which re-pointed
+whatever flashinfer that held. `package.sh` stamps a staged copy of the jit-cache with JSON build info on every
+shared object that has device code and fails if any holds another architecture or any PTX.
 
 ## Why a separate `flashinfer-jit-cache` wheel is required for "no JIT"
 
@@ -86,12 +88,13 @@ env vars (read by `flashinfer-jit-cache/build_backend.py`'s
 | `FLASHINFER_AOT_ADD_MOE` | `true` | Both targets are MoE (fp4/fp8) |
 | `FLASHINFER_AOT_ADD_ACT` | `true` | Activation kernels (small, kept) |
 | `FLASHINFER_AOT_ADD_MISC` | `true` | Includes norm/rope/sampling/page **and Mamba SSU** (see below) — required for Nemotron-3-Super |
-| `FLASHINFER_AOT_ADD_XQA` | `false` | Not used by either target model on this backend |
+| `FLASHINFER_AOT_ADD_XQA` | `true` | vLLM 0.32 takes the FlashInfer attention backend (XQA decode) for the NVFP4 NemotronH models; shapes are listed by `FLASHINFER_AOT_XQA_*` (below) |
+| `FLASHINFER_AOT_XQA_INPUT_TYPE`, `_FP8_KV_CACHE`, `_TOKEN_PER_PAGE`, `_HEAD_SIZE`, `_HEAD_GRP_SIZE` | `bfloat16`; `true,false`; `16,32,64`; `128`; `8,16` | The XQA shapes vLLM requested for NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4, widened to the other page sizes and group ratio 8. Not upstream's full grid; an op outside it fails loudly under `FLASHINFER_DISABLE_JIT=1`. `trtllm_utils` (needed by the same path) is built for SM 12.1 too. |
 
 `f8_dtype` is left at the flashinfer default (`float8_e4m3fn`), which matches
 both models' fp8 paths.
 
-This cuts the AOT build from **3807 ops to 111**.
+This cuts the AOT build from **3807 ops to 174** (the count with the XQA modules; 146 without them).
 
 DeepSeek-V4's MLA path is served by `gen_sparse_mla_sm120_module()`, which is
 unconditional for SM120/SM121 in `flashinfer/aot.py` (not gated by any
@@ -121,10 +124,11 @@ the merge before assuming Mamba/SSU is covered.
 
 ## Installing into vLLM
 
+Install the two wheels from the release (see its notes) or from `tuned/build/<cuda-tag>/dist/`:
+
 ```bash
-<vllm-venv>/bin/pip install --force-reinstall \
-  <flashinfer-repo>/dist/flashinfer_python-*+gb10-*.whl \
-  <flashinfer-repo>/flashinfer-jit-cache/dist/flashinfer_jit_cache-*+gb10-*.whl
+<vllm-venv>/bin/pip install --no-deps --force-reinstall \
+  <flashinfer-python wheel> <flashinfer-jit-cache wheel>
 ```
 
 Then, in vLLM's environment:
@@ -152,7 +156,7 @@ defaults and never touch the AOT cache at all:
   this doc only covers what we've verified (standard decode attention and
   Mamba SSU loading from the AOT cache without JIT) — re-verify any other op
   path you rely on the same way before assuming it's covered by the 111-op
-  filtered build.
+  filtered build (`tuned/tests/jit_cache_coverage.py` checks the XQA, trtllm_utils and decode ops).
 
 ### Verifying no-JIT end to end
 
@@ -168,5 +172,4 @@ flashinfer.single_decode_with_kv_cache(q, k, v)  # must NOT raise MissingJITCach
 ```
 
 A `flashinfer.jit.core.MissingJITCacheError` here means some op your
-deployment needs isn't in the filtered AOT config — add it back via the
-`FLASHINFER_AOT_*` env vars in `tuned/build.sh` and rebuild.
+deployment needs isn't in the filtered AOT config — add it to the `GPU_TUNED_AOT_*` lists in `tuned/repo.env` and rebuild.
