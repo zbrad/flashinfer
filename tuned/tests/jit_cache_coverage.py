@@ -17,10 +17,10 @@ from pathlib import Path
 from sys import exit as sys_exit
 
 from flashinfer import __file__ as flashinfer_file
-from flashinfer import single_decode_with_kv_cache
+from flashinfer import BatchDecodeWithPagedKVCacheWrapper
 from flashinfer.jit.tllm_utils import gen_trtllm_utils_module
 from flashinfer.xqa import get_xqa_module
-from torch import bfloat16, device, float8_e4m3fn, float16, randn
+from torch import bfloat16, device, float8_e4m3fn, float16, int32, randn, tensor, uint8, zeros
 from torch import dtype as torch_dtype
 from torch.cuda import is_available
 
@@ -69,16 +69,21 @@ class jit_cache_coverage:
 
     @staticmethod
     def check_decode() -> bool:
+        """Batch decode over a paged KV cache: the form vLLM calls. (single_decode is not in the AOT set.)"""
         if not is_available():
             LOGGER.error("no CUDA device")
             return False
         cuda = device("cuda")
-        q = randn(8, 128, dtype=bfloat16, device=cuda)
-        k = randn(16, 8, 128, dtype=bfloat16, device=cuda)
-        v = randn(16, 8, 128, dtype=bfloat16, device=cuda)
-        out = single_decode_with_kv_cache(q, k, v)
-        LOGGER.info("single_decode_with_kv_cache ran: %s %s", tuple(out.shape), out.dtype)
-        return tuple(out.shape) == (8, 128)
+        wrapper = BatchDecodeWithPagedKVCacheWrapper(zeros(128 * 1024 * 1024, dtype=uint8, device=cuda), "NHD")
+        indptr = tensor([0, 1], dtype=int32, device=cuda)
+        indices = tensor([0], dtype=int32, device=cuda)
+        last_page_len = tensor([4], dtype=int32, device=cuda)
+        wrapper.plan(indptr, indices, last_page_len, 8, 8, 128, 16, data_type=bfloat16, q_data_type=bfloat16)
+        q = randn(1, 8, 128, dtype=bfloat16, device=cuda)
+        kv = (randn(1, 16, 8, 128, dtype=bfloat16, device=cuda), randn(1, 16, 8, 128, dtype=bfloat16, device=cuda))
+        out = wrapper.run(q, kv)
+        LOGGER.info("BatchDecodeWithPagedKVCacheWrapper ran: %s %s", tuple(out.shape), out.dtype)
+        return tuple(out.shape) == (1, 8, 128)
 
     @staticmethod
     def check_workspace_empty() -> bool:
