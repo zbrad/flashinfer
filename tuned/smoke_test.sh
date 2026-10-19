@@ -85,7 +85,8 @@ with zipfile.ZipFile(wheel) as z:
         if not name.endswith(".so"):
             continue
         n += 1
-        path = os.path.join(site, name)
+        # Files under <dist>.data/purelib/ install into site-packages itself.
+        path = os.path.join(site, name.split(".data/purelib/", 1)[1] if ".data/purelib/" in name else name)
         if not os.path.isfile(path) or hashlib.sha256(open(path, "rb").read()).hexdigest() != hashlib.sha256(z.read(name)).hexdigest():
             bad.append(name)
 print(f"{n} {len(bad)} " + " ".join(bad[:5]))
