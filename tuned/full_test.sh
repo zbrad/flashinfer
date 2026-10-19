@@ -79,7 +79,7 @@ SITE_DIR="$(cd "${TESTDIR}" && "${PY}" -I -c 'import sysconfig; print(sysconfig.
     echo "torch:   $(cd "${TESTDIR}" && "${PY}" -I -c 'import torch; print(torch.__version__, "cuda", torch.version.cuda, torch.cuda.get_device_name(0) if torch.cuda.is_available() else "no device")' 2>&1 | tail -1)"
     echo "scope:   gates; tuned/tests/jit_cache_coverage.py (JIT disabled, empty workspace)"
     echo "devices: CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} (single-GPU build: multi-GPU tests are not part of its scope)"
-    echo "skips by design: upstream's pytest suite (tests/) is not run (G3, recorded decision, docs/ARCHITECTURE.md); no multi-GPU tests; the model-level check is vllm's acceptance test, run in that repo"
+    echo "skips by design: upstream's pytest suite (tests/) is not run (G3, proposed decision pending the owner, docs/ARCHITECTURE.md); no multi-GPU tests; the model-level check is vllm's acceptance test, run in that repo"
     echo "gates: wheels installed --no-deps in the build venv; python and jit-cache wheels are one version; every jit-cache shared object is single-arch ${GPU_TUNED_FLASHINFER_ARCH} with no PTX; toolkit libs resolve under ${CUDA_HOME}; build commit ${BUILD_COMMIT} == HEAD outside tuned/"
     echo ""
 } > "${RESULTS_FILE}"
