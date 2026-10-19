@@ -1,11 +1,12 @@
 #!/bin/bash
-# tuned/release.sh <variant> — publish an already-built (tuned/build.sh
+# tuned/release.sh <variant> — check an already-built (tuned/build.sh
 # <variant>) flashinfer-python wheel (and, for variants with
-# GPU_TUNED_NEEDS_AOT_JIT_CACHE=true, the flashinfer-jit-cache wheel) as a
-# real GitHub release, matching zbrad/raft's/zbrad/cuvs's/zbrad/faiss's
-# tuned/package.sh conventions (v<short_ver>-<variant>-<cuda_tag> tag,
-# --target tuned-builds). flashinfer previously built wheels into dist/
-# with no publish step at all.
+# GPU_TUNED_NEEDS_AOT_JIT_CACHE=true, the flashinfer-jit-cache wheel) and,
+# if they are there, write the ready-marker that tuned/publish.sh <variant>
+# publishes as a GitHub release. It never publishes. The release tag and
+# assets match zbrad/raft's/zbrad/cuvs's/zbrad/faiss's tuned/package.sh
+# conventions (v<short_ver>-<variant>-<cuda_tag> tag, --target tuned-builds).
+# flashinfer previously built wheels into dist/ with no publish step at all.
 #
 # CUDA_TAG here is informational only (flashinfer-python's wheel itself is
 # pure-Python, py3-none-any -- it doesn't encode a CUDA version in its own
@@ -15,7 +16,8 @@
 #
 # Usage:
 #   bash tuned/build.sh gb10      # first, produces dist/*.whl (+ jit-cache)
-#   bash tuned/release.sh gb10    # then, publish both as one release
+#   bash tuned/release.sh gb10    # then, check them and write the ready-marker
+#   bash tuned/publish.sh gb10    # then, publish both as one release
 set -euo pipefail
 
 GPU_TUNED_ARG_VARIANT="$1"
@@ -23,6 +25,10 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=env.sh
 source "${REPO_ROOT}/tuned/env.sh" "${GPU_TUNED_ARG_VARIANT}"
 cd "${REPO_ROOT}"
+
+# Ready-marker (tuned/publish.sh reads it). Cleared first, so a failed run leaves none behind.
+MARKER="${REPO_ROOT}/dist/RELEASE_READY_${GPU_TUNED_VARIANT}"
+gpu_tuned_release_marker_clear "${MARKER}"
 
 VERSION="$(tr -d '\r' < "${REPO_ROOT}/version.txt")"
 
@@ -81,10 +87,12 @@ echo "  CUDA    : ${CUDA_TAG}"
 echo "  Assets  :"
 for a in "${ASSETS[@]}"; do echo "    - ${a%%#*}"; done
 echo ""
-echo "Publishing to GitHub release ${RELEASE_TAG}..."
-gpu_tuned_publish_release "zbrad/flashinfer" "${RELEASE_TAG}" "${RELEASE_TITLE}" \
-    "${NOTES}" "${ASSETS[@]}"
+# Release notes are passed to gpu_tuned_release_ready as a file (its marker records the file's sha256).
+NOTES_FILE="${REPO_ROOT}/dist/RELEASE_NOTES_${GPU_TUNED_VARIANT}.md"
+printf '%s\n' "${NOTES}" > "${NOTES_FILE}"
 
-echo ""
-echo "Release: https://github.com/zbrad/flashinfer/releases/tag/${RELEASE_TAG}"
+echo "Recording ready-marker for GitHub release ${RELEASE_TAG} (publish with tuned/publish.sh ${GPU_TUNED_VARIANT})..."
+gpu_tuned_release_ready "${MARKER}" "zbrad/flashinfer" "${RELEASE_TAG}" "${RELEASE_TITLE}" \
+    "${NOTES_FILE}" "${ASSETS[@]}"
+
 echo "Done."
