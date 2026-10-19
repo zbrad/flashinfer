@@ -148,6 +148,12 @@ if [[ "${GPU_TUNED_NEEDS_AOT_JIT_CACHE}" == "true" ]]; then
     export FLASHINFER_AOT_ADD_ACT="${GPU_TUNED_AOT_ADD_ACT}"
     export FLASHINFER_AOT_ADD_MISC="${GPU_TUNED_AOT_ADD_MISC}"
     export FLASHINFER_AOT_ADD_XQA="${GPU_TUNED_AOT_ADD_XQA}"
+    # Optional XQA shape lists (flashinfer/aot.py); unset keeps upstream's defaults.
+    [[ -n "${GPU_TUNED_AOT_XQA_INPUT_TYPE:-}" ]] && export FLASHINFER_AOT_XQA_INPUT_TYPE="${GPU_TUNED_AOT_XQA_INPUT_TYPE}"
+    [[ -n "${GPU_TUNED_AOT_XQA_FP8_KV_CACHE:-}" ]] && export FLASHINFER_AOT_XQA_FP8_KV_CACHE="${GPU_TUNED_AOT_XQA_FP8_KV_CACHE}"
+    [[ -n "${GPU_TUNED_AOT_XQA_TOKEN_PER_PAGE:-}" ]] && export FLASHINFER_AOT_XQA_TOKEN_PER_PAGE="${GPU_TUNED_AOT_XQA_TOKEN_PER_PAGE}"
+    [[ -n "${GPU_TUNED_AOT_XQA_HEAD_SIZE:-}" ]] && export FLASHINFER_AOT_XQA_HEAD_SIZE="${GPU_TUNED_AOT_XQA_HEAD_SIZE}"
+    [[ -n "${GPU_TUNED_AOT_XQA_HEAD_GRP_SIZE:-}" ]] && export FLASHINFER_AOT_XQA_HEAD_GRP_SIZE="${GPU_TUNED_AOT_XQA_HEAD_GRP_SIZE}"
     FLASHINFER_LOCAL_VERSION="${FLASHINFER_TUNED_LOCAL_VERSION}" python3 -m build --wheel --no-isolation "${REPO_ROOT}/flashinfer-jit-cache"
     echo "Built wheel(s):"
     ls -lh "${REPO_ROOT}"/flashinfer-jit-cache/dist/*.whl

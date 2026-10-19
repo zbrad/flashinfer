@@ -980,7 +980,9 @@ def gen_all_modules(
                         *dtype_combo, dim, dstate, ntokens, cs_dtype, na_dtype
                     )
                 )
-        if has_sm90 or has_sm100:
+        # zbrad/flashinfer tuned-builds: also for SM110/120/121. The runtime builds it for any SM12x (it compiles for
+        # GB10), so leaving it out of the AOT set made every SM12x run compile it at first use.
+        if has_sm90 or has_sm100 or has_sm110 or has_sm120 or has_sm121:
             jit_specs.append(gen_trtllm_utils_module())
         # The runtime dispatcher (flashinfer/mamba/selective_state_update.py)
         # picks the sm100 variant for any sm_major >= 10 (SM100/110/120/121),
@@ -1017,6 +1019,21 @@ def gen_all_modules(
         xqa_token_per_page_ = [16, 32, 64, 128]
         xqa_head_size_ = [64, 128, 256]
         xqa_head_grp_size_ = [1, 2, 4, 8]  # Different group sizes for MQA/GQA
+        # zbrad/flashinfer tuned-builds: the defaults above are upstream's. A tuned build narrows or widens them with
+        # comma-separated FLASHINFER_AOT_XQA_* variables (tuned/devices/<variant>.conf), so the AOT set covers the
+        # shapes the target models use (for example head_group_ratio 16, which the defaults omit) without building
+        # every combination.
+        _xqa_dtypes = {"float16": torch.float16, "bfloat16": torch.bfloat16}
+        if _v := os.environ.get("FLASHINFER_AOT_XQA_INPUT_TYPE"):
+            xqa_input_type_ = [_xqa_dtypes[x] for x in _v.split(",")]
+        if _v := os.environ.get("FLASHINFER_AOT_XQA_FP8_KV_CACHE"):
+            xqa_fp8_kv_cache_ = [x.strip().lower() == "true" for x in _v.split(",")]
+        if _v := os.environ.get("FLASHINFER_AOT_XQA_TOKEN_PER_PAGE"):
+            xqa_token_per_page_ = [int(x) for x in _v.split(",")]
+        if _v := os.environ.get("FLASHINFER_AOT_XQA_HEAD_SIZE"):
+            xqa_head_size_ = [int(x) for x in _v.split(",")]
+        if _v := os.environ.get("FLASHINFER_AOT_XQA_HEAD_GRP_SIZE"):
+            xqa_head_grp_size_ = [int(x) for x in _v.split(",")]
 
         jit_specs += list(
             gen_xqa(
