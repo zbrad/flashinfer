@@ -20,7 +20,7 @@ CUDA_TAG=cu134 bash tuned/publish.sh gb10      # publishes exactly what release.
 | `env.sh` | device, toolkit and tree setup; sourced by every script |
 | `repo.env` | flashinfer-only settings: pinned torch wheel, toolkit restriction, the `GPU_TUNED_AOT_*` kernel lists |
 | `common.sh`, `sync-common.sh`, `common-data/` | vendored from tuned-common; refresh with `bash tuned/sync-common.sh sync` |
-| `build.sh`, `full_test.sh`, `package.sh`, `smoke_test.sh`, `release.sh`, `publish.sh` | the stages above |
+| `build.sh`, `wheel.sh`, `full_test.sh`, `package.sh`, `smoke_test.sh`, `release.sh`, `publish.sh` | the stages above (`build.sh` makes the venv, then `wheel.sh` makes the wheels and the label) |
 | `tests/jit_cache_coverage.py` | with `FLASHINFER_DISABLE_JIT=1` and an empty workspace: `trtllm_utils`, every configured XQA shape and a decode kernel must load from the cache, and nothing may compile |
 | `docs/gb10_build.md` | why the jit-cache exists, what it covers, how vLLM uses it |
 | `compliance.conf` | attestations for the checks `tools/tuned_compliance.sh` cannot make mechanically |
