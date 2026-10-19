@@ -1,98 +1,60 @@
 #!/bin/bash
-# tuned/release.sh <variant> — check an already-built (tuned/build.sh
-# <variant>) flashinfer-python wheel (and, for variants with
-# GPU_TUNED_NEEDS_AOT_JIT_CACHE=true, the flashinfer-jit-cache wheel) and,
-# if they are there, write the ready-marker that tuned/publish.sh <variant>
-# publishes as a GitHub release. It never publishes. The release tag and
-# assets match zbrad/raft's/zbrad/cuvs's/zbrad/faiss's tuned/package.sh
-# conventions (v<short_ver>-<variant>-<cuda_tag> tag, --target tuned-builds).
-# flashinfer previously built wheels into dist/ with no publish step at all.
+# tuned/release.sh <variant> — run the release gates for the wheels tuned/package.sh made. Stage order:
+#   build.sh -> full_test.sh -> package.sh -> smoke_test.sh -> (review and commit tuned/releases/RELEASE_NOTES_<version>.md) -> this -> publish.sh
+# It never builds, tests, packages or publishes (docs/ARCHITECTURE.md B3, I5). If every gate passes it writes the
+# ready-marker (gpu_tuned_release_ready, RELEASE_READY_<variant>); tuned/publish.sh <variant> publishes exactly what the
+# gates saw. The gates are the common ones in tuned-common (gpu_tuned_release_gates), all reported together.
 #
-# CUDA_TAG here is informational only (flashinfer-python's wheel itself is
-# pure-Python, py3-none-any -- it doesn't encode a CUDA version in its own
-# filename the way raft/cuvs/faiss .so's do); derived from nvcc so the
-# release tag still records which toolkit the AOT jit-cache .so (if any)
-# was compiled against.
+#   CUDA_TAG=cu134 bash tuned/release.sh gb10
 #
-# Usage:
-#   bash tuned/build.sh gb10      # first, produces dist/*.whl (+ jit-cache)
-#   bash tuned/release.sh gb10    # then, check them and write the ready-marker
-#   bash tuned/publish.sh gb10    # then, publish both as one release
-set -euo pipefail
+# The release is named by the wheels' date label (v<version>, the version ending +<variant>.cu<cuda>.<YYYYMMDD>[.<seq>]),
+# read from package-info.txt and never recomputed here: the notes commit moves HEAD and its date.
+set -uo pipefail
 
-GPU_TUNED_ARG_VARIANT="$1"
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPODIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+GPU_TUNED_ARG_VARIANT="${1:?usage: tuned/release.sh <variant>}"
+
 # shellcheck source=env.sh
-source "${REPO_ROOT}/tuned/env.sh" "${GPU_TUNED_ARG_VARIANT}"
-cd "${REPO_ROOT}"
+source "${REPODIR}/tuned/env.sh" "${GPU_TUNED_ARG_VARIANT}" || exit 1
+cd "${REPODIR}" || exit 1
 
-# Ready-marker (tuned/publish.sh reads it). Cleared first, so a failed run leaves none behind.
-MARKER="${REPO_ROOT}/dist/RELEASE_READY_${GPU_TUNED_VARIANT}"
+INFO="${GPU_TUNED_DIST_DIR}/package-info.txt"
+TEST_LOG="${GPU_TUNED_RELEASES_DIR}/TEST_RESULTS_${GPU_TUNED_VARIANT}.log"
+SMOKE_LOG="${GPU_TUNED_RELEASES_DIR}/SMOKE_RESULTS_${GPU_TUNED_VARIANT}.log"
+MARKER="${GPU_TUNED_RELEASES_DIR}/RELEASE_READY_${GPU_TUNED_VARIANT}"
 gpu_tuned_release_marker_clear "${MARKER}"
 
-VERSION="$(tr -d '\r' < "${REPO_ROOT}/version.txt")"
-
-# Wildcard after ${GPU_TUNED_VARIANT} (not a literal "-") -- build.sh's
-# FLASHINFER_LOCAL_VERSION now carries variant.cuTAG.tuning.N, not just
-# the bare variant, so the wheel filename has more after it than a single
-# "-cp314-..." tag suffix.
-MAIN_WHEEL="$(find "${REPO_ROOT}/dist" -maxdepth 1 -name "flashinfer_python-${VERSION}+${GPU_TUNED_VARIANT}*.whl" | head -1)"
-if [[ -z "${MAIN_WHEEL}" ]]; then
-    echo "ERROR: no flashinfer_python-${VERSION}+${GPU_TUNED_VARIANT}*.whl found in dist/." >&2
-    echo "  Run 'bash tuned/build.sh ${GPU_TUNED_VARIANT}' first." >&2
+if [[ ! -f "${INFO}" ]]; then
+    echo "ERROR: ${INFO} not found -- run 'CUDA_TAG=${CUDA_TAG} bash tuned/package.sh ${GPU_TUNED_VARIANT}' at the commit being released first." >&2
     exit 1
 fi
-
-# Read the full local version (variant, cuda tag, tuning.N) back from the
-# wheel filename rather than re-deriving cuda tag independently via nvcc --
-# avoids any drift between what build.sh actually baked in and what this
-# script assumes it did.
-FULL_VERSION="$(gpu_tuned_wheel_version "${MAIN_WHEEL}" flashinfer_python)" || exit 1
-GIT_SHA="$(git rev-parse --short HEAD)"
-# FULL_VERSION is parsed back from the wheel's own FILENAME, i.e. PEP 440's
-# normalized form. build.sh emits that same form (gpu_tuned_local_version), so
-# it round-trips; see tuned-common docs/VERSIONING.md.
-CUDA_TAG="$(echo "${FULL_VERSION}" | grep -oE 'cu[0-9]+' | head -1 || true)"
-TUNING_LABEL="$(gpu_tuned_tuning_label "${FULL_VERSION}")"
-[[ -z "${CUDA_TAG}" ]] && { echo "ERROR: could not determine CUDA tag from wheel version ${FULL_VERSION}." >&2; exit 1; }
-
-ASSETS=("${MAIN_WHEEL}#$(basename "${MAIN_WHEEL}")")
-NOTES="flashinfer-python ${FULL_VERSION} wheel for ${GPU_TUNED_HW_LABEL}, single-arch (sm_${GPU_TUNED_CUDA_ARCH})."
-
-if [[ "${GPU_TUNED_NEEDS_AOT_JIT_CACHE:-false}" == "true" ]]; then
-    JIT_WHEEL="$(find "${REPO_ROOT}/flashinfer-jit-cache/dist" -maxdepth 1 -name "flashinfer_jit_cache-${VERSION}+${GPU_TUNED_VARIANT}*.whl" | head -1)"
-    if [[ -z "${JIT_WHEEL}" ]]; then
-        echo "ERROR: GPU_TUNED_NEEDS_AOT_JIT_CACHE=true but no flashinfer_jit_cache-${VERSION}+${GPU_TUNED_VARIANT}*.whl found." >&2
-        echo "  Run 'bash tuned/build.sh ${GPU_TUNED_VARIANT}' first." >&2
-        exit 1
-    fi
-    ASSETS+=("${JIT_WHEEL}#$(basename "${JIT_WHEEL}")")
-    NOTES="${NOTES} Includes flashinfer-jit-cache (AOT-compiled kernels, no runtime JIT for its covered ops -- see tuned/devices/${GPU_TUNED_VARIANT}.conf for exact model/op coverage)."
-else
-    NOTES="${NOTES} Kernels JIT-compile lazily on first use in the consuming environment; no AOT jit-cache wheel for this variant."
+info() { sed -n "s/^$1=//p" "${INFO}"; }
+RELEASE_TAG="$(info release_tag)"; PACKAGED_COMMIT="$(info commit)"; BASE_VERSION="$(info upstream_version)"
+PY_NAME="$(info wheel_python)"; PY_WHEEL="${GPU_TUNED_DIST_DIR}/${PY_NAME}"
+ASSETS=("${PY_WHEEL}#${PY_NAME}" "${PY_WHEEL}.sha256#${PY_NAME}.sha256")
+# The compared build artifact is the unstamped wheel in wheel/, not the packaged copy in dist/: packaging writes dist/
+# on every run, so its mtime would move past the test log. The jit-cache wheel is the one that is stamped and repacked.
+BUILT_WHEEL="${GPU_TUNED_WHEEL_DIR}/${PY_NAME}"; PACKAGED_WHEEL="${PY_WHEEL}"
+if [[ "${GPU_TUNED_NEEDS_AOT_JIT_CACHE}" == "true" ]]; then
+    JIT_NAME="$(info wheel_jit_cache)"; JIT_WHEEL="${GPU_TUNED_DIST_DIR}/${JIT_NAME}"
+    ASSETS+=("${JIT_WHEEL}#${JIT_NAME}" "${JIT_WHEEL}.sha256#${JIT_NAME}.sha256")
+    BUILT_WHEEL="${GPU_TUNED_WHEEL_DIR}/${JIT_NAME}"; PACKAGED_WHEEL="${JIT_WHEEL}"
 fi
+RELEASE_NOTES_FILE="tuned/releases/RELEASE_NOTES_${RELEASE_TAG#v}.md"
+RELEASE_TITLE="flashinfer ${BASE_VERSION} — ${GPU_TUNED_VARIANT} ${CUDA_TAG} (${RELEASE_TAG#v}) — ${GPU_TUNED_HW_LABEL} wheels"
 
-# RELEASE_TAG carries the full local version (the wheel filename's own
-# identity); RELEASE_TITLE is the human-friendly separation of upstream
-# version / tuned build identity / traceability, same shape as every
-# other tuned-builds repo's release.sh|wheel.sh this session.
-RELEASE_TAG="v${FULL_VERSION}"
-RELEASE_TITLE="flashinfer ${VERSION} — ${GPU_TUNED_VARIANT} ${TUNING_LABEL:-(pre-tuning build)} (${CUDA_TAG}, ${GIT_SHA})"
+echo "Release ${RELEASE_TAG} (flashinfer ${BASE_VERSION}, packaged at ${PACKAGED_COMMIT}):"
 
-echo "===================================================="
-echo "flashinfer ${GPU_TUNED_HW_LABEL} Release"
-echo "===================================================="
-echo "  Version : ${FULL_VERSION}"
-echo "  CUDA    : ${CUDA_TAG}"
-echo "  Assets  :"
-for a in "${ASSETS[@]}"; do echo "    - ${a%%#*}"; done
+gpu_tuned_release_gates tag="${RELEASE_TAG}" variant="${GPU_TUNED_VARIANT}" cuda="${CUDA_TAG}" info="${INFO}" \
+    built="${BUILT_WHEEL}" test_log="${TEST_LOG}" \
+    test_pass='^=== Full test suite summary: gates \+ jit-cache coverage passed ===$' \
+    tarball="${PACKAGED_WHEEL}" smoke_log="${SMOKE_LOG}" notes="${RELEASE_NOTES_FILE}" packaged="${PACKAGED_COMMIT}" \
+    || { echo "" >&2; echo "ERROR: a release gate failed; nothing was published (and no ready-marker was written)." >&2; exit 1; }
+
 echo ""
-# Release notes are passed to gpu_tuned_release_ready as a file (its marker records the file's sha256).
-NOTES_FILE="${REPO_ROOT}/dist/RELEASE_NOTES_${GPU_TUNED_VARIANT}.md"
-printf '%s\n' "${NOTES}" > "${NOTES_FILE}"
-
-echo "Recording ready-marker for GitHub release ${RELEASE_TAG} (publish with tuned/publish.sh ${GPU_TUNED_VARIANT})..."
 gpu_tuned_release_ready "${MARKER}" "zbrad/flashinfer" "${RELEASE_TAG}" "${RELEASE_TITLE}" \
-    "${NOTES_FILE}" "${ASSETS[@]}"
+    "${RELEASE_NOTES_FILE}" "${ASSETS[@]}" \
+    "${TEST_LOG}#Test results (${GPU_TUNED_VARIANT})" \
+    "${SMOKE_LOG}#Package smoke test results (${GPU_TUNED_VARIANT})" || exit 1
 
 echo "Done."
