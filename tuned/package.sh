@@ -131,6 +131,7 @@ for i in "${!BUILT_WHEELS[@]}"; do
     gpu_tuned_check_wheel_label "${WHEEL}"
     gpu_tuned_write_sha256_sidecar "${WHEEL}"
     SHA="$(awk '{print $1}' "${WHEEL}.sha256")"
+    PRIMARY_SHA="${SHA}"   # the last wheel packaged: the jit-cache when the variant ships one, else the python wheel (what release.sh gates)
     echo "Wheel:  ${BUILT_NAME} ($(du -sh "${WHEEL}" | awk '{print $1}'))  sha256 ${SHA}"
     INFO_LINES+=("wheel_${PKG#flashinfer_}=${BUILT_NAME}" "sha256_${PKG#flashinfer_}=${SHA}")
 done
@@ -180,6 +181,7 @@ fi
     echo "tested_commit=${TESTED_COMMIT}"
     echo "cuda_tag=${CUDA_TAG}"
     echo "variant=${GPU_TUNED_VARIANT}"
+    echo "sha256=${PRIMARY_SHA}"
     printf '%s\n' "${INFO_LINES[@]}"
 } > "${GPU_TUNED_DIST_DIR}/package-info.txt"
 
