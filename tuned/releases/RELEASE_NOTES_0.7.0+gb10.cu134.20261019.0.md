@@ -6,7 +6,7 @@ Single-arch flashinfer wheels for NVIDIA GB10 (DGX Spark, Blackwell, SM 12.1 acc
 - Built from commit 7feea7de57d3d5bcf30291c094c2a7611939d44a; tested at 7feea7de57d3d5bcf30291c094c2a7611939d44a
 - Upstream base: upstream/main merge-base 012542c8523b7e0034fb24a65f0599c6f60b56ff
 - sha256_python: 22c6c323b99b90fa98e1b5391e5e0e18832161d3cb5b46e9eab860b01cb28595
-- sha256_jit_cache: 4031875f4f7894d1159f5510f48d6a727660f25afa8511439843b175afb0bead
+- sha256_jit_cache: a62eb2c28f92b023d29325e4d20ca5598e1a4d65d0b8612e275f101d72ceb8f8
 
 ## What changed in this release
 
