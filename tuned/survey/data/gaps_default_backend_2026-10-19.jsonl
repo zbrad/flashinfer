@@ -1,0 +1,8 @@
+{"entry": "Qwen/Qwen3-0.6B", "ok": true, "error": null, "compiled": []}
+{"entry": "Qwen/Qwen3-0.6B@FLASHINFER", "ok": true, "error": null, "compiled": ["xqa_input_bf16_kv_cache_bf16_output_bf16_page_size_16_head_dim_128_head_group_ratio_2_use_sliding_window_False_use_spec_dec_False_spec_q_seq_len_1"]}
+{"entry": "Qwen/Qwen2.5-0.5B-Instruct", "ok": true, "error": null, "compiled": []}
+{"entry": "HuggingFaceTB/SmolLM2-135M", "ok": true, "error": null, "compiled": []}
+{"entry": "TinyLlama/TinyLlama-1.1B-Chat-v1.0", "ok": true, "error": null, "compiled": []}
+{"entry": "meta-llama/Llama-3.2-1B-Instruct", "ok": true, "error": null, "compiled": []}
+{"entry": "google/gemma-3-1b-it", "ok": true, "error": null, "compiled": []}
+{"entry": "Qwen/Qwen3-4B-Instruct-2507-FP8", "ok": true, "error": null, "compiled": []}
