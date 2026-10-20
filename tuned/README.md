@@ -25,7 +25,7 @@ CUDA_TAG=cu134 bash tuned/publish.sh gb10      # publishes exactly what release.
 | `tests/jit_cache_coverage.py` | with `FLASHINFER_DISABLE_JIT=1` and an empty workspace: `trtllm_utils`, every configured XQA shape and a decode kernel must load from the cache, and nothing may compile |
 | `docs/gb10_build.md` | why the jit-cache exists, what it covers, how vLLM uses it |
 | `docs/shape_survey.md` | which model shapes the jit-cache does and does not cover: a Hugging Face config survey plus small-model runs, with each claim labeled config, measured or inferred |
-| `survey/` | the scripts behind that survey (`hf_shape_survey.py`, `run_small_models.py`) and the 2026-10-19 data snapshots in `survey/data/` |
+| `survey/` | the scripts behind that survey (`hf_shape_survey.py`, `run_small_models.py`) and the 2026-10-19 and 2026-10-20 data snapshots in `survey/data/` |
 | `compliance.conf` | attestations for the checks `tools/tuned_compliance.sh` cannot make mechanically |
 
 The release label is the UTC commit date of HEAD plus a sequence (`+gb10.cu134.<YYYYMMDD>[.<seq>]`), allocated once by

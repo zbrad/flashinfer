@@ -76,6 +76,33 @@ compiled the modules below. This is the case that matters if a user selects flas
 
 Prefill at `head_dim` 128 was served from the cache in the two 128-dim runs; XQA at 128 was served only for ratio 8 and 16.
 
+## 2b. The widened cache, JIT disabled (measured, 2026-10-20)
+
+`tuned/repo.env` at `e555c22f0` widens the gb10 AOT scope to FA2 prefill and XQA decode at `head_dim` 64/128/256, group
+ratios 1-8 and 16, bf16 and fp16 (pages 16/32/64, bf16 and fp8 KV unchanged). The jit-cache built from it has 911 shared
+objects and the wheel is 223.2 MB (213M by `ls`), against 174 objects and 87.5 MB for `…20261019.0`. This is a candidate
+for the next release; it is not published.
+
+The same nine models, on both backends, with the packaged `0.7.0+gb10.cu134.20261020.0` wheels installed in a copy of the
+vllm `0.32.1.dev94` build venv, `FLASHINFER_DISABLE_JIT=1` (`run_small_models.py --disable-jit`), an empty workspace, one
+process per model, `gpu_memory_utilization` 0.15, `max_model_len` 512, eager mode, 16 generated tokens:
+
+| Backend | Models run | Loaded and generated | Modules compiled |
+|---|---:|---:|---:|
+| FlashInfer (`attention_backend="FLASHINFER"`) | 9 | 9 | 0 |
+| vLLM default (flash-attn) | 9 | 9 | 0 |
+
+Data: `tuned/survey/data/nojit_flashinfer_backend_2026-10-20.jsonl`, `nojit_default_backend_2026-10-20.jsonl`. With JIT
+disabled a missing module raises, so a pass shows the cache served that model's FlashInfer calls. The seven models that
+compiled modules in section 2 (xqa ratio 2 and 4 at `head_dim` 128; prefill and xqa at `head_dim` 64; prefill and xqa at
+`head_dim` 256 with and without sliding window) now run with none; `opt-125m` (fp16, ratio 1) and the AWQ model also pass on
+the FlashInfer backend, which section 2 had not run.
+
+Limits: single runs; generation was checked to complete, not for correct text; the first default-backend invocation was
+corrupted by concurrent test activity on the node (per the repo owner) after two models, and its other seven models were
+rerun, so that file joins two invocations. Not run: ratios 1, 5 and 6 on a `head_dim` other than 64, MLA, models above 4B,
+long contexts, large batches, CUDA graphs.
+
 ## 3. What this suggests
 
 - **Default backend: no work.** Nothing in the 9 default-backend runs touched the cache. *Inferred:* dense bf16/fp8/fp16/AWQ
@@ -83,9 +110,12 @@ Prefill at `head_dim` 128 was served from the cache in the two 128-dim runs; XQA
 - **FlashInfer attention backend: the gap is per (`head_dim`, group ratio)** for XQA decode and per `head_dim` for prefill. In
   this sample, `head_dim` 64 and 256 (all ratios seen: 3, 4, 7, 8 and 4) and `head_dim` 128 with ratios 2 and 4 all compile at first use. Under `FLASHINFER_DISABLE_JIT=1` they
   would fail. *Inferred, not run:* with JIT disabled these models would raise `MissingJITCacheError`; the runs above had JIT allowed.
+  (Section 2b runs them with JIT disabled against the widened cache.)
 - **A cheap targeted add would be**: XQA for `head_dim` {64, 128, 256} × ratios {1, 2, 3, 4, 5, 6, 7, 8, 16} (the ratios seen in
-  section 1) at the existing pages and KV dtypes, plus prefill at `head_dim` 64 and 256. *Not measured:* the build time and
-  size this adds. The first number to get is the module count and the wheel size delta from one trial build, before deciding.
+  section 1) at the existing pages and KV dtypes, plus prefill at `head_dim` 64 and 256. *Measured since (2026-10-20, one
+  machine, 13 jobs, single cold builds):* 406 objects / 136.4 MB / 22.0 min for ratios 2,3,4,7,8,16 without fp16; 514 / 145.4 MB /
+  22.7 min for ratios 1-8 and 16; 911 / 222.7 MB / 31.5 min adding fp16, against 174 / 87.5 MB / 17.4 min shipped. The last
+  is what `repo.env` now builds (section 2b).
 - **Not covered by this survey** and each deserving its own measurement:
   1. the Qwen3.5/3.6 and similar hybrids (`head_dim` 256 with linear attention; 38 Mamba/hybrid configs, with ratios 16 (12), 4 (8), 6 (8), 8 (7), 5 (2), 32 (1));
   2. MLA models (DeepSeek, GLM: 19 configs);
@@ -114,8 +144,8 @@ without access. Ungated alternatives exist for most rows.
 - The sample is the most downloaded 300, one day, and mixes bases with their copies. The ranking says nothing about the users of this fleet.
 - Nine models were run (seven on both backends, opt-125m and the AWQ model on the default backend only), 16 tokens each, 512 context, eager mode. A larger batch or a
   CUDA-graph run could reach other modules.
-- The runs allowed JIT, so a gap shows as a compiled module. A run with JIT disabled would show the first missing
-  module only.
+- The section 2 runs allowed JIT, so a gap shows as a compiled module. A run with JIT disabled shows the first missing
+  module only; the section 2b runs used it and found none.
 - Shape counts are from `config.json` and the derivation in `hf_shape_survey.py` (group ratio = heads / KV heads, head_dim =
   `head_dim` or hidden size / heads). Models with unusual configs (nested text configs, multi-query flags) may be read wrongly.
 - `tuned/survey/data/hf_survey_2026-10-19.jsonl` is a snapshot; rerunning the script later gives a different list.

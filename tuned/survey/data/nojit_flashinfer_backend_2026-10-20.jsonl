@@ -1,0 +1,9 @@
+{"entry": "Qwen/Qwen3-0.6B@FLASHINFER", "ok": true, "error": null, "compiled": []}
+{"entry": "Qwen/Qwen3-4B-Instruct-2507-FP8@FLASHINFER", "ok": true, "error": null, "compiled": []}
+{"entry": "Qwen/Qwen2.5-0.5B-Instruct@FLASHINFER", "ok": true, "error": null, "compiled": []}
+{"entry": "HuggingFaceTB/SmolLM2-135M@FLASHINFER", "ok": true, "error": null, "compiled": []}
+{"entry": "TinyLlama/TinyLlama-1.1B-Chat-v1.0@FLASHINFER", "ok": true, "error": null, "compiled": []}
+{"entry": "meta-llama/Llama-3.2-1B-Instruct@FLASHINFER", "ok": true, "error": null, "compiled": []}
+{"entry": "google/gemma-3-1b-it@FLASHINFER", "ok": true, "error": null, "compiled": []}
+{"entry": "facebook/opt-125m@FLASHINFER", "ok": true, "error": null, "compiled": []}
+{"entry": "Qwen/Qwen2.5-0.5B-Instruct-AWQ@FLASHINFER", "ok": true, "error": null, "compiled": []}
