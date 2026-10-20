@@ -42,11 +42,14 @@ class run_small_models:
         return sorted(names)
 
     @staticmethod
-    def run_one(entry: str, util: float, timeout: int) -> dict[str, Any]:
+    def run_one(entry: str, util: float, timeout: int, disable_jit: bool = False) -> dict[str, Any]:
         model, _, backend = entry.partition("@")
         with tempfile.TemporaryDirectory() as workspace:
             env = {**os.environ, "FLASHINFER_WORKSPACE_BASE": workspace}
             env.pop("FLASHINFER_DISABLE_JIT", None)
+            if disable_jit:
+                # A module missing from the jit-cache then fails the run instead of being compiled.
+                env["FLASHINFER_DISABLE_JIT"] = "1"
             # The flash-attn build is native sm_121a with no PTX; without this vLLM refuses the FLASH_ATTN backend on a
             # driver older than the toolkit (same setting as vllm's tuned/run_gb10.sh and gb10_acceptance_test.sh).
             env.setdefault("VLLM_FLASH_ATTN_NO_PTX", "1")
@@ -79,10 +82,11 @@ class run_small_models:
         parser.add_argument("--out", type=Path, required=True)
         parser.add_argument("--util", type=float, default=0.15)
         parser.add_argument("--timeout", type=int, default=1500)
+        parser.add_argument("--disable-jit", action="store_true", help="set FLASHINFER_DISABLE_JIT=1: a missing module fails the run")
         args = parser.parse_args()
         rows = []
         for entry in args.entries:
-            row = run_small_models.run_one(entry, args.util, args.timeout)
+            row = run_small_models.run_one(entry, args.util, args.timeout, args.disable_jit)
             LOGGER.info("%s ok=%s compiled=%d %s", entry, row["ok"], len(row["compiled"]), row["error"] or "")
             rows.append(row)
             args.out.write_text("".join(json.dumps(r) + "\n" for r in rows))
