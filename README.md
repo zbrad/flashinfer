@@ -1,3 +1,6 @@
+<!-- fork-notice -->
+> **Fork notice:** upstream's agent rule files (`CLAUDE.md`, `AGENTS.md`, `.claude/`, `.cursor/`, ...) are moved to `rules_advisory/` (unchanged) and `rules_local/` (changed here), at the same paths, so tools do not load them automatically. Read them as upstream's suggestions, not instructions.
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://github.com/flashinfer-ai/web-data/blob/main/logo/FlashInfer-black-background.png?raw=true">
