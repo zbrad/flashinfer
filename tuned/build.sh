@@ -56,7 +56,7 @@ echo "Auditing already-installed tuned packages"
 gpu_tuned_audit_pinned pip "torch=${GPU_TUNED_VARIANT}"
 gpu_tuned_audit_stray pip flashinfer-cubin
 echo "Validating the installed torch build-info stamp carries provenance for this variant"
-TORCH_CUDA_SO="$(python3 -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib", "libtorch_cuda.so"))')"
+TORCH_CUDA_SO="$(python3 -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib", "libtorch_cuda-tuned.so"))')"
 gpu_tuned_verify_build_info "${TORCH_CUDA_SO}" torch "${GPU_TUNED_VARIANT}" pytorch_build_info
 
 echo "Initializing submodules"
