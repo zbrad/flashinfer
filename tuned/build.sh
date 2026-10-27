@@ -56,6 +56,9 @@ echo "Installing the pinned torch wheel"
 pip install "${GPU_TUNED_TORCH_WHEEL_URL}"
 echo "Installing flashinfer's requirements (torch stays the pinned wheel)"
 grep -v '^torch$' requirements.txt | pip install -r /dev/stdin
+# The current setuptools, installed last so nothing above can hold it back (C8, tuned-common). The
+# "setuptools<82" above was torch's ceiling for the stock wheel; the pinned tuned torch is already installed.
+gpu_tuned_install_setuptools || exit 1
 
 echo "Auditing already-installed tuned packages"
 # Non-fatal: surfaces a stock torch that replaced the tuned one, or a stray flashinfer-cubin, before the build relies on it.
