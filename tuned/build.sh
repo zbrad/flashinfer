@@ -50,14 +50,15 @@ echo ""
 
 echo "Installing build-time requirements..."
 pip install --upgrade pip
-# setuptools>=77 parses the SPDX license field in pyproject.toml; torch's ceiling is <82.
-pip install build wheel "setuptools>=77,<82" "packaging>=24.2"
+# setuptools is installed by gpu_tuned_install_setuptools below, not here: flashinfer's pyproject needs >=77
+# (SPDX license field) and the common minimum is higher; the old "<82" was torch's ceiling for the stock wheel.
+pip install build wheel "packaging>=24.2"
 echo "Installing the pinned torch wheel"
 pip install "${GPU_TUNED_TORCH_WHEEL_URL}"
 echo "Installing flashinfer's requirements (torch stays the pinned wheel)"
 grep -v '^torch$' requirements.txt | pip install -r /dev/stdin
-# The current setuptools, installed last so nothing above can hold it back (C8, tuned-common). The
-# "setuptools<82" above was torch's ceiling for the stock wheel; the pinned tuned torch is already installed.
+# The current setuptools (at least GPU_TUNED_SETUPTOOLS_MIN), installed last so nothing above can hold it back
+# (C8, tuned-common). The pinned tuned torch needs only setuptools>=77.0.3.
 gpu_tuned_install_setuptools || exit 1
 
 echo "Auditing already-installed tuned packages"
