@@ -88,6 +88,12 @@ rm -f "${GPU_TUNED_DIST_DIR}/package-info.txt" "${GPU_TUNED_DIST_DIR}"/flashinfe
 command -v readelf >/dev/null && command -v objcopy >/dev/null && command -v cuobjdump >/dev/null \
     || { echo "ERROR: readelf, objcopy and cuobjdump are needed for the packaging checks (H4)." >&2; exit 1; }
 
+# Dependency audit of each wheel's resolved runtime deps (H9, tuned-common): a vulnerable version with a fix fails.
+for i in "${!BUILT_WHEELS[@]}"; do
+    gpu_tuned_audit_deps "${BUILT_WHEELS[$i]}" "${GPU_TUNED_BUILD_ROOT}/dependency-audit-${WHEEL_PKGS[$i]}.log" \
+        || { echo "ERROR: dependency audit failed for $(basename "${BUILT_WHEELS[$i]}") (see above and ${GPU_TUNED_BUILD_ROOT}/dependency-audit-${WHEEL_PKGS[$i]}.log)." >&2; exit 1; }
+done
+
 UNPACK_DIR="$(mktemp -d)"
 trap 'rm -rf "${UNPACK_DIR}"' EXIT
 INFO_LINES=()
