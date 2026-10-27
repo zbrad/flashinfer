@@ -25,18 +25,8 @@ command -v python3 &>/dev/null || { echo "ERROR: python3 not found on PATH." >&2
 [[ -n "${GPU_TUNED_TORCH_WHEEL_URL}" ]] || { echo "ERROR: tuned/repo.env pins no torch wheel for ${GPU_TUNED_VARIANT}; there is nothing to build against." >&2; exit 1; }
 
 VENV_DIR="${GPU_TUNED_VENV_DIR}"
-if [[ "${GPU_TUNED_CLEAN_VENV:-}" == "1" && -d "${VENV_DIR}" ]]; then
-    echo "GPU_TUNED_CLEAN_VENV=1: removing ${VENV_DIR} for a clean rebuild"
-    rm -rf "${VENV_DIR}"
-fi
-if [[ -d "${VENV_DIR}" ]]; then
-    # Reusing the venv is the default: the install is slow. Verify it was not copied from another checkout.
-    gpu_tuned_verify_venv "${VENV_DIR}" "${REPO_ROOT}"
-else
-    python3 -m venv "${VENV_DIR}"
-fi
-# shellcheck source=/dev/null
-source "${VENV_DIR}/bin/activate"
+# Create or reuse (verified), activate, upgrade pip, current setuptools: one shared setup (C9, tuned-common).
+gpu_tuned_setup_build_venv "${VENV_DIR}" "${REPO_ROOT}" || exit 1
 
 echo "=========================================="
 echo "Building flashinfer for ${GPU_TUNED_HW_LABEL}"
@@ -50,8 +40,8 @@ echo ""
 
 echo "Installing build-time requirements..."
 pip install --upgrade pip
-# setuptools is installed by gpu_tuned_install_setuptools below, not here: flashinfer's pyproject needs >=77
-# (SPDX license field) and the common minimum is higher; the old "<82" was torch's ceiling for the stock wheel.
+# setuptools comes from gpu_tuned_setup_build_venv above (flashinfer's pyproject needs >=77 for the SPDX license
+# field; the common minimum is higher). The old "<82" was torch's ceiling for the stock wheel.
 pip install build wheel "packaging>=24.2"
 echo "Installing the pinned torch wheel"
 pip install "${GPU_TUNED_TORCH_WHEEL_URL}"
