@@ -30,3 +30,10 @@ CUDA_TAG=cu134 bash tuned/publish.sh gb10      # publishes exactly what release.
 
 The release label is the UTC commit date of HEAD plus a sequence (`+gb10.cu134.<YYYYMMDD>[.<seq>]`), allocated once by
 `build.sh`. Nothing is installed into `~/.local` or the user site.
+
+## Build venv and gates
+
+- The venv is `tuned/build/<cuda-tag>/venv`, made by `gpu_tuned_setup_build_venv` in `build.sh` (`GPU_TUNED_CLEAN_VENV=1`
+  recreates it) with the pinned torch wheel from `repo.env`; the current setuptools (at least 84.2) is installed last (C8).
+- `package.sh` fails if the venv's setuptools is below the minimum (H10) and audits each wheel's runtime dependencies
+  (H9), logged to `tuned/build/<cuda-tag>/dependency-audit-<package>.log`.
