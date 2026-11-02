@@ -33,10 +33,14 @@ RELEASE_TAG="$(info release_tag)"; PACKAGED_COMMIT="$(info commit)"; BASE_VERSIO
 PY_NAME="$(info wheel_python)"; PY_WHEEL="${GPU_TUNED_DIST_DIR}/${PY_NAME}"
 ASSETS=("${PY_WHEEL}#${PY_NAME}" "${PY_WHEEL}.sha256#${PY_NAME}.sha256")
 # The compared build artifact is the unstamped wheel in wheel/, not the packaged copy in dist/: packaging writes dist/
-# on every run, so its mtime would move past the test log. The jit-cache wheel is the one that is stamped and repacked.
+# on every run, so its mtime would move past the test log. The jit-cache is the shim plus the provider wheel that holds
+# the compiled shared objects (tuned/wheel.sh); the provider is the one that is stamped and repacked, so it is gated.
 BUILT_WHEEL="${GPU_TUNED_WHEEL_DIR}/${PY_NAME}"; PACKAGED_WHEEL="${PY_WHEEL}"
 if [[ "${GPU_TUNED_NEEDS_AOT_JIT_CACHE}" == "true" ]]; then
-    JIT_NAME="$(info wheel_jit_cache)"; JIT_WHEEL="${GPU_TUNED_DIST_DIR}/${JIT_NAME}"
+    PROVIDER_TAG="sm$(printf '%s' "${GPU_TUNED_FLASHINFER_ARCH}" | tr -d '.')"
+    SHIM_NAME="$(info wheel_jit_cache)"; SHIM_WHEEL="${GPU_TUNED_DIST_DIR}/${SHIM_NAME}"
+    JIT_NAME="$(info "wheel_jit_cache_${PROVIDER_TAG}")"; JIT_WHEEL="${GPU_TUNED_DIST_DIR}/${JIT_NAME}"
+    ASSETS+=("${SHIM_WHEEL}#${SHIM_NAME}" "${SHIM_WHEEL}.sha256#${SHIM_NAME}.sha256")
     ASSETS+=("${JIT_WHEEL}#${JIT_NAME}" "${JIT_WHEEL}.sha256#${JIT_NAME}.sha256")
     BUILT_WHEEL="${GPU_TUNED_WHEEL_DIR}/${JIT_NAME}"; PACKAGED_WHEEL="${JIT_WHEEL}"
 fi

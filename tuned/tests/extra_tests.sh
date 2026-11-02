@@ -46,7 +46,8 @@ raise SystemExit(pytest.main(sys.argv[2:]))
 install_wheels() {
     local py="$1" w
     local wheels=()
-    for k in python jit_cache; do wheels+=("${GPU_TUNED_DIST_DIR}/$(sed -n "s/^wheel_${k}=//p" "${INFO}")"); done
+    # Every wheel package.sh made: python, and with an AOT cache the shim and its provider wheel.
+    while IFS= read -r w; do wheels+=("${GPU_TUNED_DIST_DIR}/${w}"); done < <(sed -n 's/^wheel_[a-z0-9_]*=//p' "${INFO}")
     for w in "${wheels[@]}"; do [[ -f "${w}" ]] || { echo "ERROR: ${w} not found." >&2; exit 1; }; done
     "${py}" -m pip install --quiet --no-deps --force-reinstall "${wheels[@]}" || exit 1
 }
