@@ -263,6 +263,7 @@ def set_nvfp4_4over6_env(request):
 
 NON_GATED_ACTIVATION_SUPPORTED_QUANT_MODES = [
     QuantMode.FP4_NVFP4_NVFP4,
+    QuantMode.FP4_MXFP4_MXFP8,
     QuantMode.FP8_BLOCK_SCALE_MXFP8,
     QuantMode.FP8_PER_TENSOR,
     QuantMode.BF16,
@@ -409,14 +410,6 @@ def skip_checks(
         ):
             pytest.skip(
                 "Prims-TS FP8 per-tensor DeepSeekV3 routing requires a gated activation"
-            )
-        if (
-            is_fp4_moe
-            and moe_impl.quant_mode == QuantMode.FP4_NVFP4_NVFP4
-            and activation_type == ActivationType.Relu2
-        ):
-            pytest.skip(
-                "Prims-TS NVFP4xNVFP4 Relu2 output quantization is not supported yet"
             )
     if (
         is_fp8_block_scale_moe
@@ -616,6 +609,9 @@ def compute_reference_moe_fp4(
     Returns:
         Output tensor [num_tokens, hidden_size]
     """
+    if activation is None and int(activation_type) == ActivationType.SwigluStep.value:
+        activation = "swiglu_step"
+        swiglu_limit = 7.0 if swiglu_limit is None else swiglu_limit
     if activation is None:
         normalized_activation_type, gated = normalize_cute_dsl_moe_activation_type(
             activation_type
@@ -633,6 +629,7 @@ def compute_reference_moe_fp4(
     else:
         supported_activations = {
             "silu",
+            "swiglu_step",
             "situ",
             "gelu_tanh",
             "swigluoai_uninterleave",
@@ -709,6 +706,10 @@ def compute_reference_moe_fp4(
                     act_out = F.gelu(gate, approximate="tanh") * linear
                 elif activation == "silu":
                     act_out = silu(gate) * linear
+                elif activation == "swiglu_step":
+                    act_out = silu(gate).clamp(max=swiglu_limit) * linear.clamp(
+                        min=-swiglu_limit, max=swiglu_limit
+                    )
                 else:
                     if swiglu_limit is not None:
                         gate = gate.clamp(max=swiglu_limit)

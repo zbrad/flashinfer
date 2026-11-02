@@ -38,23 +38,27 @@ All-Gather Matmul
 
 ``all_gather_matmul`` keeps its architecture-based default routing when
 ``backend="auto"``. On SM100 and SM103, ``backend="cake"`` explicitly selects
-the source-built fused backend for contiguous bfloat16 or float16 inputs with
-``K=8192``, ``N=2048``, a positive ``M`` divisible by 128, an NVSHMEM symmetric
-memory backend, and a two- or four-rank NCCL process group. The local input may
-be an ordinary contiguous CUDA tensor because Cake uses internal symmetric
-scratch and flags for remote access and synchronization. Unsupported explicit
-Cake requests raise instead of silently falling back.
-The packaged manifest carries the exact dynamic shared-memory requirement
-resolved for every generated main route; the loader validates that value
-against the packaged CUDA source before compiling the host launcher.
+the Cake fused backend for bfloat16 or float16 operands with ``K=8192``: a
+contiguous ``[M, 8192]`` input with any positive ``M``, a ``[8192, N]`` weight
+with ``N`` a positive multiple of 256 that is either contiguous or the
+transposed view of a contiguous ``[N, 8192]`` parameter (each layout has its
+own generated kernel; no copy is made), an NVSHMEM symmetric memory backend,
+and a two-, four- or eight-rank NCCL process group. The local input may be an
+ordinary contiguous CUDA tensor because Cake uses internal symmetric scratch
+and flags for remote access and synchronization; the scratch of a group grows
+to the largest ``M`` seen, and that growth is the only collective after the
+first call. Unsupported explicit Cake requests raise instead of silently
+falling back. One generated source per kernel serves both architectures; the
+JIT loader compiles it with the exact flag set of the device it runs on.
 
-``prepare_all_gather_matmul`` prepares the source-built packed-QKV route for
-SM103, bfloat16, four-rank NCCL groups, contiguous ``[M, 8192]`` inputs, and a
-contiguous ``[8192, 2560]`` weight, where ``M`` is a positive multiple of 128.
-It binds the weight and process group once and returns a callable that accepts
-a contiguous input with the same shape, dtype, and device. Both
-``backend="auto"`` and ``backend="cake"`` select this prepared route.
-Unsupported configurations raise during preparation instead of falling back.
+``prepare_all_gather_matmul`` binds the weight, the process group and a row
+capacity ``max_rows`` (default: the rows of the sample input) once, sizing the
+symmetric scratch in that single collective, and returns a callable that
+accepts any contiguous input with the same dtype, device and ``K`` and at
+most ``max_rows`` rows. Both ``backend="auto"`` and ``backend="cake"`` select
+this prepared Cake route; the same operand rules as the one-shot Cake route
+apply. Unsupported configurations raise during preparation instead of falling
+back.
 
 .. autosummary::
     :toctree: ../generated
@@ -142,6 +146,74 @@ memory do not support this lifecycle.
 
 .. autoclass:: MNNVLAllReduceFusionWorkspace
     :members:
+    :show-inheritance:
+
+    .. automethod:: __init__
+
+MNNVL CuTe DSL backend
+~~~~~~~~~~~~~~~~~~~~~~
+
+``create_allreduce_fusion_workspace(backend="mnnvl-cutedsl", ...)`` builds an
+:class:`~flashinfer.comm.mnnvl_cutedsl_ar.MNNVLCuteDSLAllReduceFusionWorkspace`:
+CuTe DSL kernels for the ranks of one NVLink multicast domain, compiled for
+one static problem. ``backend="auto"`` never selects it. The keyword-only
+arguments of the factory (``top_k``, ``rms_eps``, ``weight_bias``,
+``routed_scaling_factor``, ``include_shared_expert``, ``add_residual``,
+``write_residual_output``, ``apply_rms_norm``, ``output_dtype``,
+``dynamic_fp8``, ``write_norm_output`` and ``config``) are compile-time
+settings: every :func:`allreduce_fusion` call on the workspace must use the
+same epsilon, weight bias, residual, norm and output mode, and at most
+``max_token_num`` tokens of ``hidden_dim`` BF16 elements. Other backends
+reject these arguments. ``residual_in`` must be identical on every rank, as
+under tensor parallelism: most kernels add the residual once, on the rank that
+owns a token or a hidden-dimension shard.
+
+The kernels spin on data written by the other ranks and some of them occupy
+every SM. Do not run two of these collectives (for example from two
+workspaces) concurrently on different streams: a rank whose SMs are all held
+by one collective cannot start the other, which the peers may be waiting on.
+
+The workspace picks a static profile for ``(world_size, hidden_dim, top_k,
+dtype)`` and the device's compute capability, then routes each token count to
+a low-latency (LL), balanced (BT) or high-throughput (HT) kernel. Construction
+fails when no profile matches; :func:`is_mnnvl_cutedsl_supported` runs the same
+checks without raising. It describes the local rank only, and construction is
+collective, so agree on the result across ranks first:
+
+.. code-block:: python
+
+    ok = is_mnnvl_cutedsl_supported(
+        4, 8192, torch.bfloat16, max_token_num=2048, apply_rms_norm=False
+    )
+    flag = torch.tensor(int(ok), device="cuda")
+    torch.distributed.all_reduce(flag, op=torch.distributed.ReduceOp.MIN)
+    if flag.item():
+        workspace = create_allreduce_fusion_workspace(
+            backend="mnnvl-cutedsl",
+            world_size=4,
+            rank=rank,
+            max_token_num=2048,
+            hidden_dim=8192,
+            dtype=torch.bfloat16,
+            apply_rms_norm=False,
+            add_residual=False,
+        )
+        out = allreduce_fusion(
+            input=x, workspace=workspace, pattern=AllReduceFusionPattern.kAllReduce
+        )
+
+A workspace built with ``apply_rms_norm=False`` and ``add_residual=False``
+serves ``kAllReduce``; the default norm-on workspace serves
+``kARResidualRMSNorm`` and the MoE finalize pattern, an
+``output_dtype=torch.float8_e4m3fn`` workspace the static FP8 patterns, and one
+with ``dynamic_fp8=True`` as well the dynamic FP8 patterns.
+
+.. autosummary::
+    :toctree: ../generated
+
+    is_mnnvl_cutedsl_supported
+
+.. autoclass:: flashinfer.comm.mnnvl_cutedsl_ar.MNNVLCuteDSLAllReduceFusionWorkspace
     :show-inheritance:
 
     .. automethod:: __init__
@@ -254,6 +326,70 @@ depth rather than a grid size.
     get_pcie_ipc_launch_config
     probe_pcie_ipc_rank_topology
     resolve_pcie_ipc_profile
+
+PCIe IPC AllGather and ReduceScatter
+------------------------------------
+
+These standalone workspaces support BF16, FP16, and FP32 tensors at world sizes
+2, 4, and 8. ``max_numel`` sizes one rank's shard: the AllGather input or the
+ReduceScatter output. Tensors must be contiguous, rank-2, 16-byte aligned, and
+contain complete 16-byte packs.
+
+Their Python implementation lives in ``flashinfer.comm.pcie_ipc_collectives``;
+the public entry points remain the ``flashinfer.comm`` exports shown below.
+
+As with :class:`PcieIpcAllReduceWorkspace`, construction, calls, and destruction
+are collective. Every rank must issue the same sequence and configuration, and
+one workspace belongs to one ordered CUDA stream. Keep the workspace alive
+until every captured CUDA graph replay has completed.
+
+AllGather copies opaque 16-byte packs. ReduceScatter accumulates in FP32 and
+converts to the requested output dtype; its TP8 schedule converts one four-rank
+partial before the final accumulation, so bitwise agreement with NCCL is not
+part of the contract.
+
+The TP8 CopyEngine AllGather and topology ReduceScatter schedules require live
+UUID/NVML evidence that logical ranks ``0..3`` and ``4..7`` form the expected
+two-island placement. AllGather falls back to recursive doubling when that
+proof is unavailable; TP8 ReduceScatter reports the input as unsupported.
+
+.. code-block:: python
+
+    import flashinfer.comm as comm
+
+    ag = comm.PcieIpcAllGatherWorkspace(group, max_local_rows * hidden, dtype=x.dtype)
+    rs = comm.PcieIpcReduceScatterWorkspace(group, max_local_rows * hidden, dtype=x.dtype)
+
+    gathered = ag.all_gather(x)            # [world_size * local_rows, hidden]
+    shard = rs.reduce_scatter(reduced_input)  # [local_rows, hidden]
+
+    ag.destroy()
+    rs.destroy()
+
+``launch_config()`` returns a conservative seed. ``tune([hidden, ...])`` checks
+every candidate against NCCL, minimizes the maximum latency across ranks, and
+persists exact-shape results. The cache key includes the collective, world size,
+topology/rank-placement fingerprint, workspace limits, dtype, and shape.
+
+The seed thresholds are heuristics; support does not imply a performance win.
+The variant names combine communication schedule, transport, and batching:
+``COPY_ENGINE`` uses recursive doubling, and ``ONE_PACK`` means one 16-byte
+pack per thread in a grid-sized batch. See
+:doc:`PCIe IPC AG/RS schedules <../design_docs/pcie_ipc_ag_rs>` for the seven
+variants, synchronization/traffic models, topology boundary, and measurement
+provenance.
+
+.. autosummary::
+    :toctree: ../generated
+
+    PcieIpcAllGatherWorkspace
+    PcieIpcAllGatherLaunchConfig
+    PcieIpcAllGatherVariant
+    get_pcie_ipc_all_gather_launch_config
+    PcieIpcReduceScatterWorkspace
+    PcieIpcReduceScatterLaunchConfig
+    PcieIpcReduceScatterVariant
+    get_pcie_ipc_reduce_scatter_launch_config
 
 Ulysses Context-Parallel All-to-All
 -----------------------------------
@@ -489,6 +625,13 @@ TensorRT-LLM MNNVL AllReduce
 MNNVL A2A (Throughput Backend)
 -------------------------------
 
+These are the kernel-level primitives of the NVLink one-sided MoE all-to-all.
+``MoeAlltoAll`` is deprecated in favor of
+:class:`flashinfer.moe_ep.NVLinkOneSidedAlltoAll` (and
+:class:`flashinfer.moe_ep.CakeAlltoAll` for ``backend="cake"``),
+which expose the dispatch/combine interface shared by all expert-parallel
+communication backends; its implementation will move into those classes.
+
 .. currentmodule:: flashinfer.comm
 
 .. autosummary::
@@ -543,6 +686,61 @@ DCP All-to-All (Context-Parallel Attention Reduction)
     decode_cp_a2a_allocate_mnnvl_workspace
     decode_cp_a2a_init_workspace
     decode_cp_a2a_alltoall
+
+NCCL LSA DCP All-to-All + LSE Reduce
+-------------------------------------
+
+The fused path uses PyTorch NCCL symmetric memory and requires every context-
+parallel rank to be in one load/store-accessible NVLink domain. It does not use
+the MNNVL workspace accepted by ``decode_cp_a2a_alltoall``.
+
+.. autosummary::
+    :toctree: ../generated
+
+    decode_cp_a2a_lse_reduce_workspace_size
+    decode_cp_a2a_lse_reduce_create_workspace
+    decode_cp_a2a_lse_reduce
+
+TP MoE Finalize + RMSNorm
+-------------------------
+
+Tensor-parallel MoE finalize fused with the all-reduce and per-expert RMSNorm,
+over an NVLink multicast workspace (hidden size 4096, top-k 8). Initialize the
+process-wide workspace collectively with ``init_tp_moe_finalize_rmsnorm`` before
+the first call.
+
+.. currentmodule:: flashinfer.comm
+
+.. autosummary::
+    :toctree: ../generated
+
+    init_tp_moe_finalize_rmsnorm
+    supports_tp_moe_finalize_rmsnorm
+    tp_moe_finalize_rmsnorm
+
+MNNVL CuTe DSL Fused Collectives
+--------------------------------
+
+.. currentmodule:: flashinfer.comm.mnnvl_cutedsl_moe_finalize
+
+.. autosummary::
+    :toctree: ../generated
+
+    MNNVLCuteDSLMoEFinalizeAllReduceWorkspace
+    supports_moe_finalize_rmsnorm_allreduce
+    moe_finalize_rmsnorm_allreduce
+
+.. currentmodule:: flashinfer.comm.mnnvl_cutedsl_ag
+
+.. autosummary::
+    :toctree: ../generated
+
+    MNNVLCuteDSLAllGatherDualNormWorkspace
+    supports_all_gather_gated_residual_next_rmsnorm
+    all_gather_gated_residual_next_rmsnorm
+    MNNVLCuteDSLAllGatherNormQuantWorkspace
+    supports_all_gather_rmsnorm_fp4_quantize
+    all_gather_rmsnorm_fp4_quantize
 
 Mixed Communication
 -------------------

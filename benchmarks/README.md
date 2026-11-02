@@ -53,7 +53,7 @@ Currently supports testing attention, gemm, fused MOE, normalization, quantizati
     - `trtllm_fp8_per_tensor_scale_moe` - MOE with FP8 quantized weights and per-tensor scaling.
     - `cutlass_fused_moe` - CUTLASS fused MoE (base/fp8/nvfp4 variants with optional TP/EP)
     - `cute_dsl_bf16_moe` - CuTe-DSL BF16/FP16 fused MoE for Hopper.
-    - `unified_moe` - Unified MoE API comparison between the CUTLASS and cuTile backends. It supports BF16, NVFP4 W4A4/W4A16, and MXFP4 W4A4/W4A16 with gated SwiGLU, SwiGLU-Step, GeGLU, GeGLU-Tanh, and SiTU or non-gated GELU, ReLU, SiLU, ReLU2, and Identity; filters unsupported backends at runtime; and can autotune each backend independently.
+    - `unified_moe` - Unified MoE API comparison between the CUTLASS and cuTile backends. It supports BF16, NVFP4 and MXFP4 W4A4/W4A16, per-tensor FP8 and MXFP8 W8A8/W8A16, and MXFP4 W4A8 with gated SwiGLU, SwiGLU-Step, GeGLU, GeGLU-Tanh, and SiTU or non-gated GELU, ReLU, SiLU, ReLU2, and Identity; filters unsupported backends at runtime; and can autotune each backend independently.
 - MOE Communication:
     - `moe_a2a_dispatch_combine` - MoE All-to-All dispatch + combine benchmark for multi-GPU expert-parallel inference. Requires `mpirun` for multi-GPU execution. Supports optional quantization (FP8, NVFP4, FP8 block-scale) and real MoE kernel computation.
 - AllReduce Communication:
@@ -100,7 +100,7 @@ Currently supports testing attention, gemm, fused MOE, normalization, quantizati
 - Mamba (Selective State Space Models):
     - `selective_state_update` - Selective state update for Mamba layers (generation phase). Supports both single-token prediction (STP) and multi-token prediction (MTP) via `--cache_steps`. Backends: `flashinfer` (CUDA, architecture-specific kernels for base/SM90/SM100+) and `triton` (reference).
 - GDN (Gated Delta Net linear attention, SM90+):
-    - `gated_delta_rule_decode` - Single-token (T=1) gated delta rule decode. `--state_layout` selects between `gated_delta_rule_decode_pretranspose` ([B, HV, V, K] state, default) and `gated_delta_rule_decode` ([B, HV, K, V] state). `--state_dtype bfloat16` selects the BF16 state kernels (head_size=128, pretranspose only). Backends: `flashinfer` (CuTe-DSL) and `triton` (reference).
+    - `gated_delta_rule_decode` - Single-token (T=1) gated delta rule decode. `--state_layout` selects between `gated_delta_rule_decode_pretranspose` ([B, HV, V, K] state, default) and `gated_delta_rule_decode` ([B, HV, K, V] state). `--state_dtype bfloat16` selects the BF16 state kernels (head_size=128, pretranspose only). Backends: `flashinfer` (CuTe-DSL, generic kernels), `triton` (reference), `rubin` (the Rubin-tuned T=1 bf16-state kernel; SM107 only) and `rubin_ugpu` (`rubin` with uGPU localization: a `ugpu_state_pool`, each die updates the half of every state in its own memory).
     - `gated_delta_rule_mtp` - Multi-token (T>=2) gated delta rule for speculative-decoding verification, with a state pool + indices. `--state_dtype float32` uses `gated_delta_rule_mtp`; `--state_dtype bfloat16` uses the BF16 MTP kernel via `gated_delta_rule_decode_pretranspose`. Backends: `flashinfer`, `triton`.
     - `chunk_gated_delta_rule` - Chunked GDN prefill over varlen sequences (uniform per-sequence length `--s_qo`). Backends: `flashinfer` (SM90 C++ / SM100 CuTe-DSL) and `fla` (flash-linear-attention Triton baseline, perf-only).
 - KDA (SM120a):
@@ -112,7 +112,11 @@ A test case is generally invoked as `python3 flashinfer_benchmark.py --routine <
 
 The unified MoE comparison runs the selected backends from the same routing, activation,
 and weight inputs. Supported cuTile quantization modes are `bf16`, `nvfp4`,
-`nvfp4_w4a16`, `mxfp4`, and `mxfp4_w4a16`. This example uses the
+`nvfp4_w4a16`, `mxfp4`, `mxfp4_w4a16`, `fp8`, `fp8_w8a16`, `mxfp8`,
+`mxfp8_w8a16`, and `mxfp4_w4a8`. `fp8` uses per-tensor E4M3 scaling;
+`mxfp8` uses E8M0 block scales. The W8A16 modes retain BF16 activations;
+`mxfp4_w4a8` uses MXFP4 weights with MXFP8 activations. A8 modes include
+BF16-to-FP8 quantization before both GEMMs in the timed region. This example uses the
 Nemotron-3.5-Lightning MoE shape:
 
 ```bash
@@ -123,6 +127,15 @@ CUDA graph timing is enabled by default and captures one MoE invocation per
 graph replay with cold-L2 benchmarking enabled; pass `--no_cuda_graph` for eager
 timing. Without `--autotune`, results are named `cutlass` and `cutile`; autotuned
 results use `cutlass_autotune` and `cutile_autotune`.
+CUTLASS comparisons also support `fp8` (per-tensor W8A8) and `mxfp4_w4a8`
+on supported architectures. These CUTLASS runners take prequantized activations,
+so the benchmark includes their public `prepare_activations` conversion in the
+main BF16-input latency. The additional CSV columns `prequantized_median_time`
+and `prequantized_std_time` (milliseconds) report the runner-only timing without
+that input conversion. Per-tensor CUTLASS uses its fixed GEMM2 activation scale,
+whereas cuTile dynamically scales GEMM2 input; equal precision pairs do not imply
+identical quantization policies. CUTLASS `mxfp4_w4a8` requires hidden and
+intermediate sizes divisible by 128; unsupported shapes are skipped.
 On SM120/SM121, `--backends b12x cutile` also compares NVFP4 W4A4 (`nvfp4`)
 and W4A16 (`nvfp4_w4a16`). The b12x runner exposes a single heuristic tactic;
 `--autotune` does not expand its search space. MXFP4 is not supported by b12x.
@@ -524,7 +537,7 @@ Applies to `gated_delta_rule_decode`, `gated_delta_rule_mtp`, and `chunk_gated_d
 | `--update_state`              | MTP only: write the final state back (`disable_state_update=False`). BF16 state always updates in-place    |
 | `--cache_intermediate_states` | MTP with `float32` state only: cache per-token intermediate states                                         |
 | `--no_qk_l2norm`              | Decode/MTP: disable in-kernel Q/K L2 normalization                                                         |
-| `--backends`                  | Decode/MTP: `flashinfer` (default), `triton`. Prefill: `flashinfer` (default), `fla` (requires `pip install flash-linear-attention`; perf-only, excluded from refcheck) |
+| `--backends`                  | Decode/MTP: `flashinfer` (default), `triton`; decode with `--state_dtype bfloat16` also `rubin` and `rubin_ugpu` (SM107). Prefill: `flashinfer` (default), `fla` (requires `pip install flash-linear-attention`; perf-only, excluded from refcheck) |
 
 Notes:
 - Refcheck compares against the torch reference in `tests/gdn/reference_delta_rule.py`.

@@ -209,3 +209,8 @@ flashinfer/moe_ep/backends/split/comm/nixl_ep/_vendored/
 
 # Tuned builds: per-toolkit build trees (venv, wheels, dist, releases), never tracked.
 /tuned/build/
+# Local SLURM/container artifacts (never publish: logs can embed internal
+# toolchain fragments; the sqsh image is a full environment snapshot)
+.sqsh_build_logs/
+*.sqsh
+.fi_workspace/

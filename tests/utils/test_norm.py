@@ -17,6 +17,8 @@ limitations under the License.
 import pytest
 import torch
 import torch.nn.functional as F
+from tests.test_helpers.parametrize import pairwise_product_cases, parametrize_product
+from tests.test_helpers.pdl import late_store
 
 import flashinfer
 from flashinfer.jit import env as jit_env
@@ -136,13 +138,18 @@ def test_norm(batch_size, hidden_size, dtype, specify_out, enable_pdl, contiguou
     torch.testing.assert_close(y_ref, y, rtol=1e-3, atol=1e-3)
 
 
-@pytest.mark.parametrize("batch_size", [1, 19, 99, 989])
-@pytest.mark.parametrize("hidden_size", [111, 500, 1024, 3072, 3584, 4096, 8192, 16384])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("quant_dtype", [torch.float8_e4m3fn, torch.float8_e5m2])
-@pytest.mark.parametrize("quant_scale", [0.01, 1.0, 10.0])
-@pytest.mark.parametrize("enable_pdl", [True, False])
-@pytest.mark.parametrize("contiguous", [True, False])
+@parametrize_product(
+    {
+        "batch_size": [1, 19, 99, 989],
+        "hidden_size": [111, 500, 1024, 3072, 3584, 4096, 8192, 16384],
+        "dtype": [torch.float16, torch.bfloat16],
+        "quant_dtype": [torch.float8_e4m3fn, torch.float8_e5m2],
+        "quant_scale": [0.01, 1.0, 10.0],
+        "enable_pdl": [True, False],
+        "contiguous": [True, False],
+    },
+    regular=pairwise_product_cases,
+)
 def test_norm_quant(
     batch_size, hidden_size, dtype, quant_dtype, quant_scale, enable_pdl, contiguous
 ):
@@ -231,13 +238,18 @@ def test_fused_add_rmsnorm(batch_size, hidden_size, dtype, enable_pdl, contiguou
     torch.testing.assert_close(residual_fused, residual_native, rtol=1e-3, atol=1e-3)
 
 
-@pytest.mark.parametrize("batch_size", [1, 19, 99, 989])
-@pytest.mark.parametrize("hidden_size", [111, 500, 1024, 3072, 3584, 4096, 8192, 16384])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("quant_dtype", [torch.float8_e4m3fn, torch.float8_e5m2])
-@pytest.mark.parametrize("quant_scale", [0.01, 1.0, 10.0])
-@pytest.mark.parametrize("enable_pdl", [True, False])
-@pytest.mark.parametrize("contiguous", [True, False])
+@parametrize_product(
+    {
+        "batch_size": [1, 19, 99, 989],
+        "hidden_size": [111, 500, 1024, 3072, 3584, 4096, 8192, 16384],
+        "dtype": [torch.float16, torch.bfloat16],
+        "quant_dtype": [torch.float8_e4m3fn, torch.float8_e5m2],
+        "quant_scale": [0.01, 1.0, 10.0],
+        "enable_pdl": [True, False],
+        "contiguous": [True, False],
+    },
+    regular=pairwise_product_cases,
+)
 def test_fused_add_rmsnorm_quant(
     batch_size, hidden_size, dtype, quant_dtype, quant_scale, enable_pdl, contiguous
 ):
@@ -934,6 +946,49 @@ def test_norm_compilation_without_fp8():
 
     # Verify the module loaded successfully
     assert module is not None
+
+
+# The public API takes CuTe DSL kernels where they are supported, so call the CUDA kernels.
+def _rmsnorm_quant_cuda(out, x, residual, w, scale, enable_pdl):
+    flashinfer.norm.get_norm_module().rmsnorm_quant(out, x, w, scale, 1e-6, enable_pdl)
+
+
+def _fused_add_rmsnorm_quant_cuda(out, x, residual, w, scale, enable_pdl):
+    flashinfer.norm.get_norm_module().fused_add_rmsnorm_quant(
+        out, x, residual, w, scale, 1e-6, enable_pdl
+    )
+
+
+@pytest.mark.parametrize(
+    "norm_quant",
+    [
+        _rmsnorm_quant_cuda,
+        _fused_add_rmsnorm_quant_cuda,
+    ],
+)
+def test_norm_quant_pdl_waits_for_scale(norm_quant):
+    x = torch.randn(128, 4096, dtype=torch.bfloat16, device="cuda")
+    if not device_support_pdl(x.device):
+        pytest.skip("PDL not supported on this device")
+    residual = torch.randn_like(x)
+    w = torch.randn(4096, dtype=torch.bfloat16, device="cuda")
+    scale_value = 0.5
+
+    expected = torch.empty_like(x, dtype=torch.float8_e4m3fn)
+    scale = torch.tensor([scale_value], device="cuda")
+    norm_quant(expected, x.clone(), residual.clone(), w, scale, enable_pdl=False)
+
+    # The scale the previous kernel is still producing, as in a dynamic-scale pipeline.
+    # No other kernel may run between that producer and the norm kernel.
+    out = torch.empty_like(expected)
+    x, residual = x.clone(), residual.clone()
+    scale = torch.tensor([scale_value * 4], device="cuda")
+    late_store(scale, scale_value)
+    norm_quant(out, x, residual, w, scale, enable_pdl=True)
+
+    torch.testing.assert_close(
+        out.view(torch.uint8), expected.view(torch.uint8), rtol=0, atol=0
+    )
 
 
 if __name__ == "__main__":

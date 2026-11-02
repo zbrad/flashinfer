@@ -40,6 +40,11 @@ import torch
 
 from ..api_logging import flashinfer_api
 from ..tllm_enums import ActivationType
+from ..quantization.nvfp4_quantization_utils import (
+    NVFP44Over6Config,
+    make_nvfp4_global_scale,
+    resolve_nvfp4_4over6,
+)
 from ..trace.templates.moe import (
     sm90_mixed_gemm_humming_weight_preprocess_trace_dispatch,
     sm90_mixed_gemm_scale_interleave_trace,
@@ -78,7 +83,7 @@ def _activation_param_view(
     activation, num_expert_rows: int, device: torch.device
 ) -> Dict[str, torch.Tensor]:
     """Expand typed scalar semantics into the existing per-expert launcher ABI."""
-    from .api import SiTU, SwiGLU
+    from .api import SiTU, SwiGLU, SwiGLUStep
 
     activation = _normalize_activation(activation)
     values: Dict[str, torch.Tensor] = {}
@@ -95,6 +100,8 @@ def _activation_param_view(
             ("gemm1_beta", activation.linear_scale),
             ("gemm1_clamp_limit", activation.clamp_limit),
         )
+    elif isinstance(activation, SwiGLUStep) and activation != SwiGLUStep():
+        params = (("gemm1_clamp_limit", activation.limit),)
     else:
         params = ()
     for name, value in params:
@@ -654,7 +661,9 @@ def prepare_trtllm_fp4_weights(
         "output1_scale_gate_scalar": ones,
         "output2_scale_scalar": ones,
     }
-    if not is_mxfp4 and activation.is_gated:
+    from .api import SwiGLUStep
+
+    if not is_mxfp4 and activation.is_gated and not isinstance(activation, SwiGLUStep):
         # NVFP4 gated kernels consume a per-expert gate alpha; non-gated
         # activations do not, so ReLU2 must not receive this placeholder.
         result["gemm1_alpha"] = ones
@@ -1060,7 +1069,7 @@ def prepare_trtllm_fp8_per_tensor_weights(
         if activation.is_gated
         else torch.ones_like(w1_scale) * intermediate_scale
     )
-    return {
+    result = {
         "gemm1_weights": torch.stack(w1_shuffled),
         "gemm2_weights": torch.stack(w2_shuffled),
         "output1_scales_scalar": output1_scale.contiguous(),
@@ -1071,6 +1080,15 @@ def prepare_trtllm_fp8_per_tensor_weights(
         "hidden_states_scale_global": input_scale,
         "intermediate_scale_global": intermediate_scale,
     }
+    from .api import SwiGLUStep
+
+    if isinstance(activation, SwiGLUStep) and activation != SwiGLUStep():
+        # The exported BMM ABI clamps raw GEMM accumulators. Gate scale is the
+        # FC1 dequant scale, so convert the typed physical limit per expert.
+        result["gemm1_clamp_limit"] = (
+            activation.limit / result["output1_scales_gate_scalar"]
+        ).contiguous()
+    return result
 
 
 def prepare_trtllm_fp8_per_tensor_activations(
@@ -1683,6 +1701,74 @@ def prepare_cutile_mxfp4_weights(
     }
 
 
+def prepare_cutile_fp8_weights(
+    w1_fp8: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2_fp8: torch.Tensor,
+    w2_scale: torch.Tensor,
+    *,
+    num_local_experts: int,
+    hidden_size: int,
+    intermediate_size: int,
+    block_scaled: bool,
+    activation_type: ActivationType = ActivationType.Swiglu,
+    device: Optional[torch.device] = None,
+) -> Dict[str, torch.Tensor]:
+    """Prepare checkpoint E4M3 weights without requantizing or expanding them.
+
+    Per-tensor scales are FP32, one per expert GEMM (shape ``[E]``).
+    MXFP8 scales are E8M0 bytes in logical ``[E, N, K/32]`` order.
+    Both A16 and A8 consume the same prepared tensors on every supported GPU.
+    Canonical gated GEMM1 rows arrive as ``[up, gate]`` and are prepared in the
+    kernel-consumed ``[gate, up]`` order.
+    """
+    from .api import _CUTILE_SUPPORTED_ACTIVATIONS
+
+    activation_type = ActivationType(activation_type)
+    if activation_type not in _CUTILE_SUPPORTED_ACTIVATIONS:
+        raise ValueError(f"unsupported cuTile FP8 activation {activation_type!r}.")
+    if (
+        min(hidden_size, intermediate_size) <= 0
+        or hidden_size % 32
+        or intermediate_size % 32
+    ):
+        raise ValueError(
+            "cuTile FP8 requires positive hidden/intermediate sizes divisible by 32."
+        )
+    if device is None:
+        device = w1_fp8.device
+    device = torch.device(device)
+    rows = intermediate_size * (2 if activation_type.is_gated else 1)
+    result = {}
+    for name, weight, scale, n, k in (
+        ("w1", w1_fp8, w1_scale, rows, hidden_size),
+        ("w2", w2_fp8, w2_scale, hidden_size, intermediate_size),
+    ):
+        if weight.dtype != torch.float8_e4m3fn:
+            raise TypeError("cuTile FP8 weights must use torch.float8_e4m3fn.")
+        if tuple(weight.shape) != (num_local_experts, n, k):
+            raise ValueError(f"{name} must have shape {(num_local_experts, n, k)}.")
+        shape = (
+            (num_local_experts, n, k // 32) if block_scaled else (num_local_experts,)
+        )
+        if tuple(scale.shape) != shape:
+            raise ValueError(f"{name}_scale must have shape {shape}.")
+        dtype = torch.float8_e8m0fnu if block_scaled else torch.float32
+        if scale.dtype not in ((dtype, torch.uint8) if block_scaled else (dtype,)):
+            raise TypeError(f"{name}_scale must use {dtype}.")
+        weight = weight.to(device).contiguous()
+        scale = scale.to(device).contiguous().view(dtype)
+        if name == "w1" and activation_type.is_gated:
+            up, gate = weight.view(torch.uint8).chunk(2, dim=1)
+            weight = torch.cat((gate, up), dim=1).view(torch.float8_e4m3fn)
+            if block_scaled:
+                up, gate = scale.view(torch.uint8).chunk(2, dim=1)
+                scale = torch.cat((gate, up), dim=1).view(dtype)
+        result[name] = weight
+        result[f"{name}_scale"] = scale
+    return result
+
+
 def prepare_cutile_bf16_weights(
     w1_bf16: torch.Tensor,
     w2_bf16: torch.Tensor,
@@ -1846,6 +1932,10 @@ def prepare_cutlass_w4a16_weights(
 
 
 _NVFP4_SF_VEC_SIZE = 16
+# MinKDimAlignmentNVFP4 of the CUTLASS expand kernel: the row stride of the
+# linear activation block scale is padded to hidden_size / 16 rounded up to
+# this alignment / 16, so hidden_size itself must be a multiple of it.
+_CUTLASS_NVFP4_HIDDEN_ALIGNMENT = 64
 _NVFP4_SF_SWIZZLE_ROWS = 128
 
 
@@ -1887,13 +1977,20 @@ def prepare_cutlass_nvfp4_weights(
             "prepare_cutlass_nvfp4_weights expects BF16 weights, got "
             f"w1={w1_bf16.dtype}, w2={w2_bf16.dtype}."
         )
-    if (
-        hidden_size % _NVFP4_SF_VEC_SIZE != 0
-        or intermediate_size % _NVFP4_SF_VEC_SIZE != 0
-    ):
+    # The expand kernel reads the canonical linear input_sf with a row stride
+    # padded to MinKDimAlignmentNVFP4 (64), so a compact [M, H / 16] pack is
+    # only correct for H % 64 == 0. GEMM2's input is quantized in-kernel, so
+    # I only needs the 16-element block. Reject here, at load time, rather
+    # than on the first forward.
+    if hidden_size % _CUTLASS_NVFP4_HIDDEN_ALIGNMENT != 0:
         raise ValueError(
-            "Cutlass NVFP4 requires hidden_size and intermediate_size "
-            f"divisible by {_NVFP4_SF_VEC_SIZE}."
+            "Cutlass NVFP4 requires hidden_size divisible by "
+            f"{_CUTLASS_NVFP4_HIDDEN_ALIGNMENT}, got {hidden_size}."
+        )
+    if intermediate_size % _NVFP4_SF_VEC_SIZE != 0:
+        raise ValueError(
+            "Cutlass NVFP4 requires intermediate_size divisible by "
+            f"{_NVFP4_SF_VEC_SIZE}, got {intermediate_size}."
         )
     activation = _normalize_activation(activation)
     gemm1_rows = _gemm1_rows(intermediate_size, activation)
@@ -2056,8 +2153,10 @@ def prepare_cutlass_fp8_per_tensor_weights(
         # Calibration metadata; the runner ignores these keys.
         "fc1_dequant": fc1_dequant,
         "fc2_dequant": fc2_dequant,
-        "hidden_states_scale_global": act_scale,
-        "intermediate_scale_global": inter_scale,
+        # Copies, so the view never aliases a caller tensor that may be written
+        # in place after preparation.
+        "hidden_states_scale_global": act_scale.clone(),
+        "intermediate_scale_global": inter_scale.clone(),
     }
 
 
@@ -2417,6 +2516,7 @@ def prepare_cute_dsl_weights(
     intermediate_size: int,
     activation=None,
     device: Optional[torch.device] = None,
+    nvfp4_4over6: Optional[NVFP44Over6Config] = None,
 ) -> Dict[str, torch.Tensor]:
     """Build the CuteDSL FP4 ``cute_dsl`` weight view.
 
@@ -2426,6 +2526,21 @@ def prepare_cute_dsl_weights(
     Starts from the same canonical bf16 expert weights as
     :func:`prepare_trtllm_fp4_weights`, so a single weight set can feed both
     backends and a shared reference.
+
+    Parameters
+    ----------
+    w1_bf16, w2_bf16 : torch.Tensor
+        Canonical BF16 expert weights.
+    num_local_experts, hidden_size, intermediate_size : int
+        Expert geometry.
+    device : torch.device, optional
+        Target device; defaults to ``w1_bf16.device``.
+    nvfp4_4over6 : NVFP44Over6Config or None
+        The 4over6 recipe the runtime activation quantizer will be given.
+        Selects ``fc2_input_scale`` only (``1 / (6 * e4m3_max)``, the value
+        the GEMM2-input candidate search requires). The weights are quantized
+        standard-NVFP4 either way. ``None`` keeps the historical
+        ``fc2_input_scale = 1.0``.
 
     Returns
     -------
@@ -2512,7 +2627,18 @@ def prepare_cute_dsl_weights(
         "w2_alpha": ones,
     }
     if not is_mxfp4:
-        view["fc2_input_scale"] = gs
+        # A pinned recipe fixes the GEMM2-input scale to 1 / (6 * e4m3_max).
+        # w2_bf16 is passed for its device only.
+        nvfp4_4over6_config = resolve_nvfp4_4over6(nvfp4_4over6)
+        view["fc2_input_scale"] = (
+            gs
+            if nvfp4_4over6_config is None
+            else make_nvfp4_global_scale(
+                w2_bf16,
+                per_token_activation=True,
+                nvfp4_4over6_config=nvfp4_4over6_config,
+            )
+        )
     return view
 
 

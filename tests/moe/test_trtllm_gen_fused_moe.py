@@ -54,17 +54,12 @@ from tests.moe.trtllm_gen_fused_moe_utils import (
     trtllm_fp8_block_scale_routed_moe,
 )
 
-pytestmark = pytest.mark.long_running
+pytestmark = [pytest.mark.long_running, pytest.mark.host_memory_heavy]
 
 
 @pytest.fixture(scope="module")
 def cache_permute_indices():
     return {}
-
-
-def _skip_prims_ts_on_sm107() -> None:
-    if get_compute_capability(torch.device("cuda")) == (10, 7):
-        pytest.skip("Prims-TS MoE kernels support SM100 and SM103, not SM107")
 
 
 # Test: Sigmoid routing (Sigmoid -> TopK) and TopKSigmoid routing (TopK -> Sigmoid),
@@ -799,7 +794,6 @@ def test_mxfp4_moe_gemm_bias(
 )
 def test_fp4_moe_gemm_bias_prims_ts(bias, moe_impl, cache_permute_indices):
     """Test FP4-family Prims-TS MoE with FC1 and FC2 GEMM bias."""
-    _skip_prims_ts_on_sm107()
     num_tokens = 32
     hidden_size = 1024
     intermediate_size = 512
@@ -904,8 +898,8 @@ def test_fp4_prims_ts_routed_modes_match_logits(cache_permute_indices):
     from flashinfer.utils import device_support_pdl
 
     compute_capability = get_compute_capability(torch.device(device="cuda"))
-    if compute_capability[0] not in ((10, 0), (10, 3), (10, 7)):
-        pytest.skip("These tests require TRTLLM FP8 MoE on SM100, SM103, or SM107.")
+    if compute_capability not in ((10, 0), (10, 3), (10, 7)):
+        pytest.skip("These tests require Prims-TS FP4 MoE on SM100, SM103, or SM107.")
     if not is_prims_ts_available():
         pytest.skip("Prims-TS dependencies are unavailable")
 
@@ -1044,7 +1038,6 @@ def test_fp4_prims_ts_routed_modes_match_logits(cache_permute_indices):
 
 def test_bf16_prims_ts_identity_activation(cache_permute_indices):
     """Smoke-test non-gated Identity activation through the Prims-TS MoE path."""
-    _skip_prims_ts_on_sm107()
     num_tokens = 32
     hidden_size = 1024
     intermediate_size = 512
@@ -1545,7 +1538,6 @@ def test_fp8_per_tensor_autotune_valid_configs_nonefp8(
 )
 def test_prims_ts_block_major_k_all_dtypes(moe_impl, cache_permute_indices):
     """Prims-TS accepts BlockMajorK weights for every supported MoE dtype."""
-    _skip_prims_ts_on_sm107()
     hidden_size = 1024
     intermediate_size = 512
     run_moe_test(
@@ -1583,6 +1575,56 @@ def test_prims_ts_block_major_k_all_dtypes(moe_impl, cache_permute_indices):
             "compatible_gemm_backends": [MoeGemmBackend.PRIMS_TS],
         },
         activation_type=ActivationType.Swiglu,
+        cache_permute_indices=cache_permute_indices,
+        routing_logits_dtype=torch.bfloat16,
+        moe_gemm_backend=MoeGemmBackend.PRIMS_TS,
+    )
+
+
+@pytest.mark.parametrize(
+    "moe_impl",
+    [
+        pytest.param(
+            FP4Moe(quant_mode=QuantMode.FP4_NVFP4_NVFP4),
+            id="NvFP4xNvFP4",
+        ),
+        pytest.param(
+            FP4Moe(quant_mode=QuantMode.FP4_MXFP4_MXFP8),
+            id="MxFP4xMxFP8",
+        ),
+    ],
+)
+def test_prims_ts_nemotron_ultra_relu2_block_scaled_fc1(
+    moe_impl, cache_permute_indices
+):
+    """Nemotron-Ultra-v3 ReLU² shape with a block-scaled FC1 output."""
+    intermediate_size = 1280
+    run_moe_test(
+        num_tokens=64,
+        hidden_size=2048,
+        intermediate_size=intermediate_size,
+        moe_impl=moe_impl,
+        routing_config={
+            "num_experts": 512,
+            "top_k": 22,
+            "padding": 8,
+            "n_groups": 1,
+            "top_k_groups": 1,
+            "routed_scaling": 2.5,
+            "has_routing_bias": True,
+            "routing_method_type": RoutingMethodType.DeepSeekV3,
+            "compatible_moe_impls": [FP4Moe],
+            "compatible_intermediate_size": [intermediate_size],
+            "compatible_activation_types": [ActivationType.Relu2],
+            "enable_autotune": False,
+        },
+        weight_processing={
+            "use_shuffled_weight": True,
+            "layout": WeightLayout.BlockMajorK,
+            "compatible_moe_impls": [FP4Moe],
+            "compatible_gemm_backends": [MoeGemmBackend.PRIMS_TS],
+        },
+        activation_type=ActivationType.Relu2,
         cache_permute_indices=cache_permute_indices,
         routing_logits_dtype=torch.bfloat16,
         moe_gemm_backend=MoeGemmBackend.PRIMS_TS,
@@ -2635,6 +2677,216 @@ def test_bf16_moe_swiglu_oa_activation_params(cache_permute_indices):
     assert torch.allclose(output_default, output_noop, atol=1e-2, rtol=1e-2)
     assert not torch.allclose(output_default, output_oa, atol=1e-2, rtol=1e-2)
     assert not torch.allclose(output_oa, output_beta_oa, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize(
+    ("moe_impl", "weight_layout"),
+    [
+        pytest.param(BF16Moe(), WeightLayout.BlockMajorK, id="bf16"),
+        pytest.param(
+            FP4Moe(quant_mode=QuantMode.FP4_NVFP4_NVFP4),
+            WeightLayout.MajorK,
+            id="nvfp4",
+        ),
+        pytest.param(FP8PerTensorMoe(), WeightLayout.MajorK, id="fp8-per-tensor"),
+        pytest.param(
+            FP8BlockScaleMoe(fp8_quantization_type=QuantMode.FP8_BLOCK_SCALE_MXFP8),
+            WeightLayout.MajorK,
+            id="mxfp8-block",
+        ),
+    ],
+)
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+def test_swiglu_step_mixed_expert_limits(
+    moe_impl, weight_layout, cache_permute_indices
+):
+    """The fused GEMM caps SiLU and up independently for per-expert 7/16 limits.
+
+    The larger inputs make both limits effective. NVFP4 and per-tensor FP8
+    have non-unit FC1 dequant scales, so this also checks their raw-limit
+    conversion; the reference consumes physical limits.
+    """
+    num_experts = 32
+    intermediate_size = 512
+    limits = torch.tensor(
+        [7.0 if expert % 2 == 0 else 16.0 for expert in range(num_experts)],
+        device="cuda",
+        dtype=torch.float32,
+    )
+    run_moe_test(
+        num_tokens=32,
+        hidden_size=512,
+        intermediate_size=intermediate_size,
+        moe_impl=moe_impl,
+        routing_config={
+            "num_experts": num_experts,
+            "top_k": 2,
+            "padding": 8,
+            "n_groups": None,
+            "top_k_groups": None,
+            "routed_scaling": None,
+            "has_routing_bias": False,
+            "routing_method_type": RoutingMethodType.Renormalize,
+            "compatible_moe_impls": [
+                BF16Moe,
+                FP4Moe,
+                FP8PerTensorMoe,
+                FP8BlockScaleMoe,
+            ],
+            "compatible_intermediate_size": [intermediate_size],
+            "enable_autotune": False,
+        },
+        weight_processing={
+            "use_shuffled_weight": True,
+            "layout": weight_layout,
+            "compatible_moe_impls": [
+                BF16Moe,
+                FP4Moe,
+                FP8PerTensorMoe,
+                FP8BlockScaleMoe,
+            ],
+        },
+        activation_type=ActivationType.SwigluStep,
+        cache_permute_indices=cache_permute_indices,
+        hidden_state_amplitude=12.0,
+        gemm1_clamp_limit=limits,
+    )
+
+
+@pytest.mark.parametrize(
+    "moe_impl",
+    [
+        pytest.param(FP4Moe(quant_mode=QuantMode.FP4_NVFP4_NVFP4), id="nvfp4"),
+        pytest.param(
+            FP8BlockScaleMoe(fp8_quantization_type=QuantMode.FP8_BLOCK_SCALE_MXFP8),
+            id="mxfp8-block",
+        ),
+    ],
+)
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+def test_swiglu_step_fused_shared_limit_16(moe_impl, cache_permute_indices):
+    """A fused shared expert reads its own cap after the routed expert rows."""
+    num_routed_experts = 32
+    limits = torch.tensor(
+        [7.0] * num_routed_experts + [16.0],
+        device="cuda",
+        dtype=torch.float32,
+    )
+    run_moe_test(
+        num_tokens=32,
+        hidden_size=512,
+        intermediate_size=512,
+        moe_impl=moe_impl,
+        routing_config={
+            "num_experts": num_routed_experts,
+            "top_k": 4,
+            "padding": 8,
+            "n_groups": 8,
+            "top_k_groups": 4,
+            "routed_scaling": 2.5,
+            "has_routing_bias": True,
+            "routing_method_type": RoutingMethodType.DeepSeekV3,
+            "num_fused_shared_experts": 1,
+            "compatible_moe_impls": [FP4Moe, FP8BlockScaleMoe],
+            "compatible_intermediate_size": [512],
+            "enable_autotune": False,
+        },
+        weight_processing={
+            "use_shuffled_weight": True,
+            "layout": WeightLayout.MajorK,
+            "compatible_moe_impls": [FP4Moe, FP8BlockScaleMoe],
+        },
+        activation_type=ActivationType.SwigluStep,
+        cache_permute_indices=cache_permute_indices,
+        hidden_state_amplitude=12.0,
+        gemm1_clamp_limit=limits,
+    )
+
+
+@pytest.mark.parametrize("limit", [0.25, 7.0, 16.0])
+@pytest.mark.parametrize("from_logits", [False, True], ids=["pre-routed", "logits"])
+def test_bf16_swiglu_step_clamps_after_silu_and_graph_replay(limit, from_logits):
+    """Sparse projections distinguish post-SiLU capping and both signs of up."""
+    from flashinfer.fused_moe import (
+        BackendOptions,
+        ExpertConfig,
+        MoEActivationPack,
+        MoEConfig,
+        MoELayer,
+        MoEWeightPack,
+        QuantConfig,
+        QuantFormat,
+        RoutingConfig,
+        RoutingInputMode,
+        SwiGLUStep,
+        TrtllmBf16Config,
+    )
+
+    if not torch.cuda.is_available() or get_compute_capability(
+        torch.device("cuda")
+    ) not in ((10, 0), (10, 3), (10, 7)):
+        pytest.skip("Requires a TRTLLM Blackwell or Rubin MoE kernel")
+    device = torch.device("cuda")
+    experts, hidden, intermediate, tokens = 8, 512, 512, 8
+    up = torch.tensor([-32.0, -8.0, -2.0, 0.5, 8.0, 32.0, 1.0, -4.0], device=device)
+    gate = torch.tensor([32.0, 16.0, 8.0, 7.0, 6.0, 1.0, -1.0, -4.0], device=device)
+    x = torch.zeros(tokens, hidden, device=device, dtype=torch.bfloat16)
+    x[:, 0], x[:, 1] = up, gate
+    w1 = torch.zeros(experts, 2 * intermediate, hidden, device=device, dtype=x.dtype)
+    w2 = torch.zeros(experts, hidden, intermediate, device=device, dtype=x.dtype)
+    w1[:, 0, 0] = w1[:, intermediate, 1] = w2[:, 0, 0] = 1
+    ids = torch.arange(tokens, device=device, dtype=torch.int32).reshape(-1, 1)
+    logits = torch.full((tokens, experts), -80.0, device=device)
+    logits.scatter_(1, ids.long(), 80.0)
+    activation = SwiGLUStep(limit=limit)
+    config = MoEConfig(
+        routing=RoutingConfig(num_experts=experts, top_k=1),
+        quant=QuantConfig(weight=QuantFormat.BF16, activation=QuantFormat.BF16),
+        experts=ExpertConfig(intermediate_size=intermediate),
+        activation=activation,
+        backend=BackendOptions(candidates=(TrtllmBf16Config(),)),
+    )
+    act = MoEActivationPack(
+        hidden_states_q=x,
+        hidden_states_scale=None,
+        topk_ids=None if from_logits else ids,
+        topk_weights=None if from_logits else torch.ones(tokens, 1, device=device),
+        routing_logits=logits if from_logits else None,
+        routing_input_mode=(
+            RoutingInputMode.FromLogits
+            if from_logits
+            else RoutingInputMode.UnpackedPrecomputed
+        ),
+    )
+    layer = MoELayer(config)
+    weights = MoEWeightPack()
+    weights.prepare_for(
+        "trtllm_bf16_routed",
+        TrtllmBf16Config.prepare_weights(
+            w1,
+            w2,
+            num_local_experts=experts,
+            hidden_size=hidden,
+            intermediate_size=intermediate,
+            activation=activation,
+        ),
+    )
+    actual = layer(act, weights).clone()
+    expected = torch.zeros_like(actual)
+    expected[:, 0] = (
+        torch.nn.functional.silu(gate).clamp(max=limit) * up.clamp(-limit, limit)
+    ).to(x.dtype)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    if limit == 0.25:
+        wrong = torch.nn.functional.silu(gate.clamp(max=limit)) * up.clamp(
+            -limit, limit
+        )
+        assert not torch.allclose(actual[:, 0].float(), wrong, rtol=0.01, atol=0.001)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = layer(act, weights)
+    graph.replay()
+    torch.testing.assert_close(captured, expected, rtol=0, atol=0)
 
 
 def test_fp8_block_scale_routed_activation_type_relu2_smoke():
