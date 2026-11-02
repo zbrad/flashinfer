@@ -28,8 +28,11 @@ gpu_tuned_check_venv_setuptools "${GPU_TUNED_VENV_DIR}" || exit 1
 # shellcheck source=/dev/null
 source "${GPU_TUNED_VENV_DIR}/bin/activate"
 
+# The jit-cache is the shim plus the provider that holds the compiled .so files (see tuned/wheel.sh). The provider is
+# last: it is the stamped wheel and the one release.sh gates (PRIMARY_SHA below).
+PROVIDER_TAG="sm$(printf '%s' "${GPU_TUNED_FLASHINFER_ARCH}" | tr -d '.')"
 WHEEL_PKGS=(flashinfer_python)
-[[ "${GPU_TUNED_NEEDS_AOT_JIT_CACHE}" == "true" ]] && WHEEL_PKGS+=(flashinfer_jit_cache)
+[[ "${GPU_TUNED_NEEDS_AOT_JIT_CACHE}" == "true" ]] && WHEEL_PKGS+=(flashinfer_jit_cache "flashinfer_jit_cache_${PROVIDER_TAG}")
 BUILT_WHEELS=()
 for pkg in "${WHEEL_PKGS[@]}"; do
     w="$(ls "${GPU_TUNED_WHEEL_DIR}/${pkg}"-*.whl 2>/dev/null | head -1)"
@@ -101,7 +104,7 @@ trap 'rm -rf "${UNPACK_DIR}"' EXIT
 INFO_LINES=()
 for i in "${!BUILT_WHEELS[@]}"; do
     BUILT="${BUILT_WHEELS[$i]}"; PKG="${WHEEL_PKGS[$i]}"; BUILT_NAME="$(basename "${BUILT}")"
-    if [[ "${PKG}" == flashinfer_jit_cache ]]; then
+    if [[ "${PKG}" == "flashinfer_jit_cache_${PROVIDER_TAG}" ]]; then
         echo "Stamping build info into a staged copy of ${BUILT_NAME}"
         STAGE="${UNPACK_DIR}/${PKG}"; mkdir -p "${STAGE}"
         python3 -m wheel unpack "${BUILT}" --dest "${STAGE}"
