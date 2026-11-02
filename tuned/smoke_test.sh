@@ -24,7 +24,9 @@ INFO="${GPU_TUNED_DIST_DIR}/package-info.txt"
 [[ -f "${INFO}" ]] || { echo "ERROR: ${INFO} not found. Run CUDA_TAG=${CUDA_TAG} bash tuned/package.sh ${GPU_TUNED_VARIANT} first." >&2; exit 1; }
 info() { sed -n "s/^$1=//p" "${INFO}"; }
 VERSION="$(info version)"
-KINDS=(python); [[ "${GPU_TUNED_NEEDS_AOT_JIT_CACHE}" == "true" ]] && KINDS+=(jit_cache)
+# The jit-cache is the shim plus the provider wheel that holds the compiled .so files (tuned/wheel.sh); the provider is last.
+PROVIDER_TAG="sm$(printf '%s' "${GPU_TUNED_FLASHINFER_ARCH}" | tr -d '.')"
+KINDS=(python); [[ "${GPU_TUNED_NEEDS_AOT_JIT_CACHE}" == "true" ]] && KINDS+=(jit_cache "jit_cache_${PROVIDER_TAG}")
 WHEELS=()
 for k in "${KINDS[@]}"; do
     w="${GPU_TUNED_DIST_DIR}/$(info "wheel_${k}")"
@@ -65,16 +67,17 @@ ok() { echo "  ok:   $*"; }
     fi
     SITE_DIR="$(cd "${WORK}" && "${PY}" -I -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
 
-    meta="$(cd "${WORK}" && "${PY}" -I -c 'import importlib.metadata as md, flashinfer; print("python=" + md.version("flashinfer-python")); print("cache=" + md.version("flashinfer-jit-cache")); print("file=" + flashinfer.__file__)' 2>&1)"
+    meta="$(cd "${WORK}" && "${PY}" -I -c 'import sys, importlib.metadata as md, flashinfer; print("python=" + md.version("flashinfer-python")); print("cache=" + md.version("flashinfer-jit-cache")); print("provider=" + md.version("flashinfer-jit-cache-" + sys.argv[1])); print("file=" + flashinfer.__file__)' "${PROVIDER_TAG}" 2>&1)"
     echo "${meta}" | sed 's/^/  | /'
     [[ "$(sed -n 's/^python=//p' <<< "${meta}")" == "${VERSION}" ]] && ok "installed flashinfer-python is exactly ${VERSION}" || fail "installed flashinfer-python is not ${VERSION}"
     if [[ "${GPU_TUNED_NEEDS_AOT_JIT_CACHE}" == "true" ]]; then
         [[ "$(sed -n 's/^cache=//p' <<< "${meta}")" == "${VERSION}" ]] && ok "installed flashinfer-jit-cache is exactly ${VERSION}" || fail "installed flashinfer-jit-cache is not ${VERSION}"
+        [[ "$(sed -n 's/^provider=//p' <<< "${meta}")" == "${VERSION}" ]] && ok "installed flashinfer-jit-cache-${PROVIDER_TAG} is exactly ${VERSION}" || fail "installed flashinfer-jit-cache-${PROVIDER_TAG} is not ${VERSION}"
     fi
     [[ "$(sed -n 's/^file=//p' <<< "${meta}")" == "${SITE_DIR}/"* ]] && ok "flashinfer loads from the venv" || fail "flashinfer loads outside ${SITE_DIR}"
 
     if [[ "${GPU_TUNED_NEEDS_AOT_JIT_CACHE}" == "true" ]]; then
-        CACHE_WHEEL="${WHEELS[1]}"
+        CACHE_WHEEL="${WHEELS[2]}"   # the provider: the wheel that holds the shared objects
         # Byte identity of every installed shared object with the packaged wheel's copy.
         diffs="$("${PY}" -I - "${CACHE_WHEEL}" "${SITE_DIR}" <<'PY'
 import hashlib, os, sys, zipfile
