@@ -94,8 +94,19 @@ command -v readelf >/dev/null && command -v objcopy >/dev/null && command -v cuo
     || { echo "ERROR: readelf, objcopy and cuobjdump are needed for the packaging checks (H4)." >&2; exit 1; }
 
 # Dependency audit of each wheel's resolved runtime deps (H9, tuned-common): a vulnerable version with a fix fails.
+# --find-links: kept for any wheel whose dependency is a sibling in the wheel dir (listed as "not audited (local wheel)").
 for i in "${!BUILT_WHEELS[@]}"; do
-    gpu_tuned_audit_deps "${BUILT_WHEELS[$i]}" "${GPU_TUNED_BUILD_ROOT}/dependency-audit-${WHEEL_PKGS[$i]}.log" \
+    if [[ "${WHEEL_PKGS[$i]}" == "flashinfer_jit_cache" ]]; then
+        # The shim's only requirement is our own provider wheel, which is not on PyPI, so the audit would have nothing to
+        # check and fail. Require that this is all it asks for; the provider (the next wheel) is audited itself.
+        shim_reqs="$(python3 -I -c 'import sys,zipfile; z=zipfile.ZipFile(sys.argv[1]); n=[x for x in z.namelist() if x.endswith("METADATA")][0]; print("\n".join(l[15:] for l in z.read(n).decode().splitlines() if l.startswith("Requires-Dist: ")))' "${BUILT_WHEELS[$i]}")"
+        [[ "${shim_reqs}" == "flashinfer-jit-cache-${PROVIDER_TAG}==${VERSION}" ]] \
+            || { echo "ERROR: the shim $(basename "${BUILT_WHEELS[$i]}") requires '${shim_reqs}', not only flashinfer-jit-cache-${PROVIDER_TAG}==${VERSION}." >&2; exit 1; }
+        echo "dependency audit: $(basename "${BUILT_WHEELS[$i]}") requires only ${shim_reqs} (our provider wheel, not on PyPI); nothing else to audit" \
+            | tee "${GPU_TUNED_BUILD_ROOT}/dependency-audit-${WHEEL_PKGS[$i]}.log"
+        continue
+    fi
+    gpu_tuned_audit_deps "${BUILT_WHEELS[$i]}" "${GPU_TUNED_BUILD_ROOT}/dependency-audit-${WHEEL_PKGS[$i]}.log" --find-links "${GPU_TUNED_WHEEL_DIR}" \
         || { echo "ERROR: dependency audit failed for $(basename "${BUILT_WHEELS[$i]}") (see above and ${GPU_TUNED_BUILD_ROOT}/dependency-audit-${WHEEL_PKGS[$i]}.log)." >&2; exit 1; }
 done
 
