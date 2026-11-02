@@ -55,8 +55,13 @@ echo "Building the flashinfer-python wheel (+${LOCAL_VERSION})"
 # Python source only (py3-none-any, no compiled CUDA binary): it exists so `import flashinfer` works in another venv.
 # Kernels JIT-compile on first use unless the flashinfer-jit-cache wheel below is installed beside it.
 FLASHINFER_LOCAL_VERSION="${LOCAL_VERSION}" python3 -m build --wheel --no-isolation --outdir "${GPU_TUNED_WHEEL_DIR}" "${REPO_ROOT}"
-# The wheel build copies licenses/*.txt to the repo root; clean those up so the working tree stays clean.
-rm -f "${REPO_ROOT}"/LICENSE.*.txt
+# The wheel build copies licenses/*.txt to the repo root; clean those up so the working tree stays clean. Upstream
+# tracks one of them (LICENSE.kda-for-kda.txt since v0.7.2), so remove only the untracked copies and restore any
+# tracked one the copy changed; an unconditional rm made the tree, and so the build commit, dirty.
+while IFS= read -r -d '' f; do rm -f -- "${REPO_ROOT}/${f}"; done \
+    < <(git -C "${REPO_ROOT}" ls-files --others --exclude-standard -z -- 'LICENSE.*.txt')
+while IFS= read -r -d '' f; do git -C "${REPO_ROOT}" checkout -- "${f}"; done \
+    < <(git -C "${REPO_ROOT}" ls-files -z -- 'LICENSE.*.txt')
 
 if [[ "${GPU_TUNED_NEEDS_AOT_JIT_CACHE}" == "true" ]]; then
     echo ""
@@ -71,8 +76,8 @@ if [[ "${GPU_TUNED_NEEDS_AOT_JIT_CACHE}" == "true" ]]; then
         "${REPO_ROOT}"/flashinfer-jit-cache/*.egg-info "${REPO_ROOT}/flashinfer-jit-cache/flashinfer_jit_cache/jit_cache" \
         "${REPO_ROOT}/flashinfer-jit-cache-provider/dist" "${REPO_ROOT}/flashinfer-jit-cache-provider/build" \
         "${REPO_ROOT}"/flashinfer-jit-cache-provider/*.egg-info \
-        "${REPO_ROOT}/flashinfer-jit-cache-provider/flashinfer_jit_cache_provider/jit_cache" \
-        "${REPO_ROOT}/build/aot-providers/${PROVIDER_TAG}"
+        "${REPO_ROOT}/flashinfer-jit-cache-provider/flashinfer_jit_cache_provider/jit_cache"
+    # build/aot-providers/<arch> (ninja's tree) is kept, as build/aot was for the old layout, so a rebuild is incremental.
 
     export FLASHINFER_AOT_FA2_HEAD_DIM="${GPU_TUNED_AOT_FA2_HEAD_DIM}"
     export FLASHINFER_AOT_FA3_HEAD_DIM="${GPU_TUNED_AOT_FA3_HEAD_DIM}"
