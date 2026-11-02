@@ -96,10 +96,63 @@ def _write_provider_manifest(jit_cache_dir: Path) -> None:
     )
 
 
+def _aot_config_overrides_from_env() -> dict:
+    """zbrad/flashinfer tuned-builds: scope the AOT set from FLASHINFER_AOT_* env vars.
+
+    Upstream's provider backend passes config=None, so it always compiles the full default set. The tuned
+    build scopes the cache to its target models (tuned/repo.env GPU_TUNED_AOT_*, exported by tuned/wheel.sh).
+    This mirrors _config_overrides_from_env() in flashinfer-jit-cache/build_backend.py, which the provider
+    path does not call; unset variables leave flashinfer.aot's defaults untouched.
+    """
+    import torch
+
+    from flashinfer.aot import parse_bool, parse_head_dim
+
+    overrides: dict = {}
+
+    def _list_env(name: str):
+        value = os.environ.get(name)
+        return value.split() if value else None
+
+    if head_dims := _list_env("FLASHINFER_AOT_FA2_HEAD_DIM"):
+        overrides["fa2_head_dim"] = [parse_head_dim(d) for d in head_dims]
+    if head_dims := _list_env("FLASHINFER_AOT_FA3_HEAD_DIM"):
+        overrides["fa3_head_dim"] = [parse_head_dim(d) for d in head_dims]
+    if dtypes := _list_env("FLASHINFER_AOT_F16_DTYPE"):
+        overrides["f16_dtype"] = [getattr(torch, d) for d in dtypes]
+    if dtypes := _list_env("FLASHINFER_AOT_F8_DTYPE"):
+        overrides["f8_dtype"] = [getattr(torch, d) for d in dtypes]
+    if bools := _list_env("FLASHINFER_AOT_USE_SLIDING_WINDOW"):
+        overrides["use_sliding_window"] = [parse_bool(b) for b in bools]
+    if bools := _list_env("FLASHINFER_AOT_USE_LOGITS_SOFT_CAP"):
+        overrides["use_logits_soft_cap"] = [parse_bool(b) for b in bools]
+
+    for key in [
+        "add_comm",
+        "add_gemma",
+        "add_oai_oss",
+        "add_moe",
+        "add_act",
+        "add_misc",
+        "add_xqa",
+    ]:
+        env_value = os.environ.get(f"FLASHINFER_AOT_{key.upper()}")
+        if env_value is not None:
+            overrides[key] = parse_bool(env_value)
+
+    return overrides
+
+
 def _build_aot_modules(verbose: bool = True) -> None:
     _ensure_build_inputs()
 
     from flashinfer import aot
+
+    config_overrides = _aot_config_overrides_from_env()
+    if verbose and config_overrides:
+        print("AOT config overrides (from FLASHINFER_AOT_* env vars):")
+        for key, value in config_overrides.items():
+            print(f"  {key}: {value}")
 
     jit_cache_dir = PROVIDER_SOURCE_DIR / "jit_cache"
     build_dir = PROJECT_ROOT / "build" / "aot-providers" / config.provider_tag
@@ -107,7 +160,7 @@ def _build_aot_modules(verbose: bool = True) -> None:
         out_dir=jit_cache_dir,
         build_dir=build_dir,
         project_root=PROJECT_ROOT,
-        config=None,
+        config=config_overrides or None,  # None falls back to aot defaults
         verbose=verbose,
         skip_prebuilt=False,
     )
