@@ -28,8 +28,10 @@ cd "${REPO_ROOT}" || exit 1
 # shellcheck source=env.sh
 source "${REPO_ROOT}/tuned/env.sh" "${GPU_TUNED_ARG_VARIANT}" || exit 1
 
+# The jit-cache is the shim plus the provider wheel that holds the compiled .so files (tuned/wheel.sh).
+PROVIDER_TAG="sm$(printf '%s' "${GPU_TUNED_FLASHINFER_ARCH}" | tr -d '.')"
 WHEEL_PKGS=(flashinfer_python)
-[[ "${GPU_TUNED_NEEDS_AOT_JIT_CACHE}" == "true" ]] && WHEEL_PKGS+=(flashinfer_jit_cache)
+[[ "${GPU_TUNED_NEEDS_AOT_JIT_CACHE}" == "true" ]] && WHEEL_PKGS+=(flashinfer_jit_cache "flashinfer_jit_cache_${PROVIDER_TAG}")
 WHEELS=()
 for pkg in "${WHEEL_PKGS[@]}"; do
     w="$(ls "${GPU_TUNED_WHEEL_DIR}/${pkg}"-*.whl 2>/dev/null | head -1)"
@@ -80,7 +82,7 @@ SITE_DIR="$(cd "${TESTDIR}" && "${PY}" -I -c 'import sysconfig; print(sysconfig.
     echo "scope:   gates; tuned/tests/jit_cache_coverage.py (JIT disabled, empty workspace)"
     echo "devices: CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} (single-GPU build: multi-GPU tests are not part of its scope)"
     echo "skips by design: upstream's pytest suite (tests/) is not run (G3, proposed decision pending the owner, docs/ARCHITECTURE.md); no multi-GPU tests; the model-level check is vllm's acceptance test, run in that repo"
-    echo "gates: wheels installed --no-deps in the build venv; python and jit-cache wheels are one version; every jit-cache shared object is single-arch ${GPU_TUNED_FLASHINFER_ARCH} with no PTX; toolkit libs resolve under ${CUDA_HOME}; build commit ${BUILD_COMMIT} == HEAD outside tuned/"
+    echo "gates: wheels installed --no-deps in the build venv; python, jit-cache shim and jit-cache provider wheels are one version; the provider is discovered through its entry point; every jit-cache shared object is single-arch ${GPU_TUNED_FLASHINFER_ARCH} with no PTX; toolkit libs resolve under ${CUDA_HOME}; build commit ${BUILD_COMMIT} == HEAD outside tuned/"
     echo ""
 } > "${RESULTS_FILE}"
 
@@ -91,6 +93,21 @@ gate_checks() {
     if [[ "${out}" == "${SITE_DIR}/"* ]]; then echo "  ok:   flashinfer is the wheel's: ${out}"
     else echo "  FAIL: flashinfer loads from '${out}', not from ${SITE_DIR}"; rc=1; fi
     if [[ "${GPU_TUNED_NEEDS_AOT_JIT_CACHE}" == "true" ]]; then
+        # The runtime finds the AOT modules only through the shim's flashinfer.jit_cache.providers entry point: the
+        # provider must be discovered, at the same version, covering the target arch, with modules listed.
+        out="$(cd "${TESTDIR}" && "${PY}" -I -c '
+import sys
+from flashinfer.jit import env
+providers = env.FLASHINFER_AOT_PROVIDERS
+want = sys.argv[1]
+ids = [p.provider_id for p in providers]
+if want not in ids:
+    print("missing provider %s; discovered %s" % (want, ids)); sys.exit(1)
+p = [p for p in providers if p.provider_id == want][0]
+print("provider %s %s: %d modules, archs %s" % (p.distribution, p.version, len(p.modules), sorted(p.cuda_architectures)))
+' "${PROVIDER_TAG}" 2>&1 | tail -1)"
+        if [[ "${out}" == "provider flashinfer-jit-cache-${PROVIDER_TAG} "* ]]; then echo "  ok:   ${out}"
+        else echo "  FAIL: jit-cache provider not discovered: ${out}"; rc=1; fi
         any=""
         while IFS= read -r so; do
             n=$((n + 1))

@@ -10,7 +10,7 @@ into the workspace. Exit status 0 only if every check passed.
 """
 
 import logging
-from importlib.metadata import version
+from importlib.metadata import distributions, version
 from itertools import product
 from os import environ
 from pathlib import Path
@@ -39,8 +39,16 @@ class jit_cache_coverage:
     def check_pairing() -> bool:
         python = version("flashinfer-python")
         cache = version("flashinfer-jit-cache")
-        LOGGER.info("flashinfer-python %s from %s; flashinfer-jit-cache %s", python, flashinfer_file, cache)
-        return python == cache
+        # The compiled modules live in the provider wheel(s), flashinfer-jit-cache-<arch>, which the shim requires.
+        providers = {
+            dist.metadata["Name"]: dist.version
+            for dist in distributions()
+            if dist.metadata["Name"].lower().startswith("flashinfer-jit-cache-")
+        }
+        LOGGER.info(
+            "flashinfer-python %s from %s; flashinfer-jit-cache %s; providers %s", python, flashinfer_file, cache, providers
+        )
+        return bool(providers) and {python, cache, *providers.values()} == {python}
 
     @staticmethod
     def check_trtllm_utils() -> bool:
