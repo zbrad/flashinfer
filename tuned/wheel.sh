@@ -6,15 +6,17 @@
 #
 #   CUDA_TAG=cu134 bash tuned/wheel.sh gb10     (normally run by tuned/build.sh)
 #
-# Both wheels carry the same local version, +<variant>.cu<cuda>.<YYYYMMDD>[.<seq>] (E1): flashinfer's own
-# _check_jit_cache_version refuses a pair whose versions differ. The label is allocated once, here (E3/E4): HEAD's UTC
+# All wheels carry the same local version, +<variant>.cu<cuda>.<YYYYMMDD>[.<seq>] (E1): flashinfer's own
+# _check_jit_cache_version refuses a set whose versions differ. The label is allocated once, here (E3/E4): HEAD's UTC
 # commit date and the lowest unused sequence among origin's tags. release-label and build-commit are written last, so
 # their presence means the build finished.
 #
-# flashinfer-jit-cache is the actual binary: AOT-compiled .so files, scoped to this variant's target models by the
-# GPU_TUNED_AOT_* lists in tuned/repo.env (flashinfer-jit-cache/build_backend.py reads them as FLASHINFER_AOT_* and maps
-# them onto flashinfer.aot's config). With it installed and FLASHINFER_DISABLE_JIT=1, a consumer gets MissingJITCacheError
-# for any op outside the set instead of a silent compile.
+# Since the merge of upstream v0.7.2.post1 the jit-cache is two wheels (upstream's provider-wheel layout): the provider
+# flashinfer-jit-cache-<arch> holds the AOT-compiled .so files, scoped to this variant's target models by the
+# GPU_TUNED_AOT_* lists in tuned/repo.env (exported here as FLASHINFER_AOT_*; the fork patch in flashinfer-jit-cache-provider/
+# build_backend.py maps them onto flashinfer.aot's config), and the flashinfer-jit-cache shim depends on it. With both
+# installed and FLASHINFER_DISABLE_JIT=1, a consumer gets MissingJITCacheError for any op outside the set instead of a
+# silent compile.
 set -euo pipefail
 
 GPU_TUNED_ARG_VARIANT="${1:?usage: tuned/wheel.sh <variant>}"
@@ -43,7 +45,10 @@ echo "Release label: ${LABEL} (local version ${LOCAL_VERSION})"
 # Remove the previous build's markers and wheels first: the markers are rewritten only if this build succeeds.
 rm -f "${GPU_TUNED_BUILD_ROOT}/build-commit" "${GPU_TUNED_BUILD_ROOT}/release-label"
 mkdir -p "${GPU_TUNED_WHEEL_DIR}"
-rm -f "${GPU_TUNED_WHEEL_DIR}"/flashinfer_python-*.whl "${GPU_TUNED_WHEEL_DIR}"/flashinfer_jit_cache-*.whl
+rm -f "${GPU_TUNED_WHEEL_DIR}"/flashinfer_python-*.whl "${GPU_TUNED_WHEEL_DIR}"/flashinfer_jit_cache-*.whl \
+    "${GPU_TUNED_WHEEL_DIR}"/flashinfer_jit_cache_sm*-*.whl
+# flashinfer-jit-cache-<arch> is the provider wheel's distribution name, from the dotted arch (12.1a -> sm121a).
+PROVIDER_TAG="sm$(printf '%s' "${GPU_TUNED_FLASHINFER_ARCH}" | tr -d '.')"
 
 echo ""
 echo "Building the flashinfer-python wheel (+${LOCAL_VERSION})"
@@ -63,7 +68,11 @@ if [[ "${GPU_TUNED_NEEDS_AOT_JIT_CACHE}" == "true" ]]; then
     compute_jit_cache_parallelism
     echo "MAX_JOBS: ${MAX_JOBS}, FLASHINFER_NVCC_THREADS: ${FLASHINFER_NVCC_THREADS}"
     rm -rf "${REPO_ROOT}/flashinfer-jit-cache/dist" "${REPO_ROOT}/flashinfer-jit-cache/build" \
-        "${REPO_ROOT}"/flashinfer-jit-cache/*.egg-info "${REPO_ROOT}/flashinfer-jit-cache/flashinfer_jit_cache/jit_cache"
+        "${REPO_ROOT}"/flashinfer-jit-cache/*.egg-info "${REPO_ROOT}/flashinfer-jit-cache/flashinfer_jit_cache/jit_cache" \
+        "${REPO_ROOT}/flashinfer-jit-cache-provider/dist" "${REPO_ROOT}/flashinfer-jit-cache-provider/build" \
+        "${REPO_ROOT}"/flashinfer-jit-cache-provider/*.egg-info \
+        "${REPO_ROOT}/flashinfer-jit-cache-provider/flashinfer_jit_cache_provider/jit_cache" \
+        "${REPO_ROOT}/build/aot-providers/${PROVIDER_TAG}"
 
     export FLASHINFER_AOT_FA2_HEAD_DIM="${GPU_TUNED_AOT_FA2_HEAD_DIM}"
     export FLASHINFER_AOT_FA3_HEAD_DIM="${GPU_TUNED_AOT_FA3_HEAD_DIM}"
@@ -81,7 +90,16 @@ if [[ "${GPU_TUNED_NEEDS_AOT_JIT_CACHE}" == "true" ]]; then
     [[ -n "${GPU_TUNED_AOT_XQA_TOKEN_PER_PAGE:-}" ]] && export FLASHINFER_AOT_XQA_TOKEN_PER_PAGE="${GPU_TUNED_AOT_XQA_TOKEN_PER_PAGE}"
     [[ -n "${GPU_TUNED_AOT_XQA_HEAD_SIZE:-}" ]] && export FLASHINFER_AOT_XQA_HEAD_SIZE="${GPU_TUNED_AOT_XQA_HEAD_SIZE}"
     [[ -n "${GPU_TUNED_AOT_XQA_HEAD_GRP_SIZE:-}" ]] && export FLASHINFER_AOT_XQA_HEAD_GRP_SIZE="${GPU_TUNED_AOT_XQA_HEAD_GRP_SIZE}"
-    FLASHINFER_LOCAL_VERSION="${LOCAL_VERSION}" python3 -m build --wheel --no-isolation --outdir "${GPU_TUNED_WHEEL_DIR}" "${REPO_ROOT}/flashinfer-jit-cache"
+    # The compiled .so files are in the provider wheel (flashinfer-jit-cache-<arch>); flashinfer-jit-cache is the shim that
+    # depends on it and discovers it through the flashinfer.jit_cache.providers entry point. Upstream's provider backend
+    # compiles for FLASHINFER_JIT_CACHE_PROVIDER_ARCH and, with the fork patch in flashinfer-jit-cache-provider/
+    # build_backend.py, honours the FLASHINFER_AOT_* scoping above.
+    FLASHINFER_JIT_CACHE_PROVIDER_ARCH="${GPU_TUNED_FLASHINFER_ARCH}" FLASHINFER_LOCAL_VERSION="${LOCAL_VERSION}" \
+        python3 -m build --wheel --no-isolation --outdir "${GPU_TUNED_WHEEL_DIR}" "${REPO_ROOT}/flashinfer-jit-cache-provider"
+    echo "Building the flashinfer-jit-cache shim wheel (requires flashinfer-jit-cache-${PROVIDER_TAG}==${LOCAL_VERSION})"
+    FLASHINFER_JIT_CACHE_WHEEL_KIND=shim FLASHINFER_JIT_CACHE_PROVIDER_ARCHS="${GPU_TUNED_FLASHINFER_ARCH}" \
+        FLASHINFER_LOCAL_VERSION="${LOCAL_VERSION}" \
+        python3 -m build --wheel --no-isolation --outdir "${GPU_TUNED_WHEEL_DIR}" "${REPO_ROOT}/flashinfer-jit-cache"
 fi
 
 MAIN_WHEEL="$(ls "${GPU_TUNED_WHEEL_DIR}"/flashinfer_python-*.whl 2>/dev/null | head -1)"
@@ -90,7 +108,9 @@ WHEELS=("${MAIN_WHEEL}")
 if [[ "${GPU_TUNED_NEEDS_AOT_JIT_CACHE}" == "true" ]]; then
     JIT_WHEEL="$(ls "${GPU_TUNED_WHEEL_DIR}"/flashinfer_jit_cache-*.whl 2>/dev/null | head -1)"
     [[ -n "${JIT_WHEEL}" ]] || { echo "ERROR: no flashinfer_jit_cache wheel in ${GPU_TUNED_WHEEL_DIR}" >&2; exit 1; }
-    WHEELS+=("${JIT_WHEEL}")
+    PROVIDER_WHEEL="$(ls "${GPU_TUNED_WHEEL_DIR}"/flashinfer_jit_cache_${PROVIDER_TAG}-*.whl 2>/dev/null | head -1)"
+    [[ -n "${PROVIDER_WHEEL}" ]] || { echo "ERROR: no flashinfer_jit_cache_${PROVIDER_TAG} wheel in ${GPU_TUNED_WHEEL_DIR}" >&2; exit 1; }
+    WHEELS+=("${JIT_WHEEL}" "${PROVIDER_WHEEL}")
 fi
 for w in "${WHEELS[@]}"; do
     pkg="$(basename "${w}")"; pkg="${pkg%%-*}"
