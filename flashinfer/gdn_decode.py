@@ -438,7 +438,7 @@ def _run_cake_gdn_decode_pretranspose(
         allow_minus_one=True,
     )
     strided_inputs = not all(tensor.is_contiguous() for tensor in (q, k, v, a, b))
-    major, minor = torch.cuda.get_device_capability(q.device)
+    major, minor = get_compute_capability(q.device)
     arch = _cake_gdn.arch_for_compute_capability(major, minor)
     route = _cake_gdn.select_cake_gdn_decode_variant(
         arch=arch,
@@ -462,16 +462,7 @@ def _run_cake_gdn_decode_pretranspose(
     batch_size, seq_len = int(q.shape[0]), int(q.shape[1])
     num_v_heads = int(v.shape[2])
     if state_pool.dtype == torch.bfloat16:
-        state_heads = batch_size * num_v_heads
-        tile_v = (
-            16
-            if route.route_id.endswith(".tile16_fullwarp")
-            else 128
-            if state_heads >= 1024
-            else 64
-            if state_heads >= 512
-            else 32
-        )
+        tile_v = _cake_gdn.cake_gdn_bf16_route_tile_v(route.route_id)
         entry(
             q,
             k,
@@ -504,7 +495,9 @@ def _run_cake_gdn_decode_pretranspose(
             output,
             initial_state_indices,
             write_indices,
-            batch_size * num_v_heads * 8,
+            batch_size
+            * num_v_heads
+            * _cake_gdn.cake_gdn_fp32_t1_ctas_per_state(route.variant_name),
             1,
             1,
         )
@@ -589,7 +582,7 @@ def _run_cake_gdn_decode_nontranspose(
         raise _cake_gdn.CakeGDNUnsupportedError(
             "GDN non-CP nontranspose decode requires exact contiguous T=1 tensors"
         )
-    major, minor = torch.cuda.get_device_capability(q.device)
+    major, minor = get_compute_capability(q.device)
     arch = _cake_gdn.arch_for_compute_capability(major, minor)
     route = _cake_gdn.select_cake_gdn_decode_variant(
         arch=arch,
@@ -606,7 +599,9 @@ def _run_cake_gdn_decode_nontranspose(
         use_qk_l2norm=use_qk_l2norm,
     )
     entry = _cake_gdn.load_cake_gdn_kernel(route.variant_name, arch)
-    blocks_per_state = 8 if batch_size < 32 else 1
+    blocks_per_state = _cake_gdn.cake_gdn_nontranspose_fp32_t1_ctas_per_state(
+        route.variant_name
+    )
     entry(
         q,
         k,
@@ -706,8 +701,10 @@ def gated_delta_rule_decode_pretranspose(
         writes the updated state back to the same slot it read from (i.e.
         ``initial_state_indices``).
     intermediate_states_buffer : torch.Tensor, optional
-        Caller-owned checkpoint buffer of shape ``[B, >=T, HV, V, K]``.
-        Supported only for ``T > 1``; its dtype must match the state dtype.
+        Caller-owned checkpoint buffer of shape ``[B, >=T, HV, V, K]``, or a
+        leading slice ``cache[:, :T]`` of such a buffer; only the first ``T``
+        steps of each batch row are written. Supported only for ``T > 1``;
+        its dtype must match the state dtype.
     disable_state_update : bool
         Skip final-state writeback for verify calls. Supported only for
         ``T > 1``. Default: ``False``.
@@ -1397,11 +1394,14 @@ def gated_delta_rule_mtp(
     output : torch.Tensor, optional
         Pre-allocated output tensor of shape ``[B, T, HV, V]``.
     intermediate_states_buffer : torch.Tensor, optional
-        Buffer for caching intermediate states, shape ``[B, T, HV, V, K]``
-        (first dim is indexed per-batch, not per-pool-slot — buffer must
-        be at least ``B`` rows and contiguous; must be float32 when
-        provided). When ``None``, intermediate states are not cached.
-        Mutually exclusive with ``ssm_state_indices``.
+        Buffer for caching intermediate states, shape
+        ``[B, S, HV, V, K]`` with ``S >= T`` (first dim is indexed per-batch,
+        not per-pool slot; must be float32 when provided). Only the first
+        ``T`` steps of each batch row are written. A leading slice of a
+        larger cache, for example ``cache[:, :T]``, is also supported; in
+        both forms the batch stride determines the physical cache capacity.
+        When ``None``, intermediate states are not cached. Mutually exclusive
+        with ``ssm_state_indices``.
     ssm_state_indices : torch.Tensor, optional
         Per-token pool scatter indices of shape ``[B, T]`` and dtype
         ``torch.int32``.  When provided, the kernel writes each intermediate
@@ -1555,38 +1555,61 @@ def gated_delta_rule_mtp(
     else:
         h0_source = initial_state.reshape(pool_size * HV, V, K)
 
-    # Handle intermediate states. The kernel indexes the buffer by batch (i_n),
-    # not by pool slot — see `flat_idx = i_n * T * HV + i_t * HV + i_hv` inside
-    # the kernel. So the buffer's first dim MUST be at least B, and the buffer
-    # MUST be contiguous so the reshape returns a free view. We make both
-    # contracts explicit here to fail loudly on caller mistakes (the pre-existing
-    # code silently did out-of-bounds writes when buffer.shape[0] < B).
+    # Handle intermediate states. The public shape is [B, S, HV, V, K] with
+    # S >= T; only steps [0, T) are written. A caller may pass a padded
+    # [B, cache_steps, ...] allocation directly or its leading view
+    # `buffer[:, :T]`; stride(0), not shape(1), carries the physical per-batch
+    # capacity used by the kernel's flat addressing in either form.
     cache_intermediate_states = intermediate_states_buffer is not None
     if cache_intermediate_states:
         buffer_size = intermediate_states_buffer.shape[0]
-        cache_steps = intermediate_states_buffer.shape[1]
 
         assert buffer_size >= B, (
             f"intermediate_states_buffer first dim ({buffer_size}) must be "
             f"at least B={B}: the kernel indexes it by batch (i_n in [0, B)), "
             f"so a smaller buffer causes out-of-bounds writes."
         )
-        assert cache_steps >= T, (
-            f"intermediate_states_buffer second dimension (cache_steps={cache_steps}) "
-            f"must be at least T={T} to prevent out-of-bounds indexing"
+        assert (
+            intermediate_states_buffer.dim() == 5
+            and intermediate_states_buffer.shape[1] >= T
+            and tuple(intermediate_states_buffer.shape[2:]) == (HV, V, K)
+        ), (
+            "intermediate_states_buffer must have logical shape "
+            f"[buffer_size, >={T}, HV={HV}, V={V}, K={K}], got "
+            f"{tuple(intermediate_states_buffer.shape)}"
         )
         assert intermediate_states_buffer.dtype == torch.float32, (
             f"intermediate_states_buffer must be float32, "
             f"got {intermediate_states_buffer.dtype}"
         )
-        assert intermediate_states_buffer.is_contiguous(), (
-            "intermediate_states_buffer must be contiguous so the kernel writes "
-            "land in the caller-owned tensor (reshape would otherwise materialize "
-            "a throwaway copy)."
+        cache_step_stride = HV * V * K
+        expected_inner_strides = (cache_step_stride, V * K, K, 1)
+        assert (
+            tuple(intermediate_states_buffer.stride()[1:]) == expected_inner_strides
+        ), (
+            "intermediate_states_buffer must be contiguous within each batch; "
+            f"expected inner strides {expected_inner_strides}, got "
+            f"{tuple(intermediate_states_buffer.stride()[1:])}"
+        )
+        cache_batch_stride = intermediate_states_buffer.stride(0)
+        assert cache_batch_stride % cache_step_stride == 0, (
+            "intermediate_states_buffer batch stride must be a whole number "
+            f"of cache steps; got stride(0)={cache_batch_stride} and "
+            f"step size={cache_step_stride}"
+        )
+        cache_steps = cache_batch_stride // cache_step_stride
+        assert cache_steps >= T, (
+            f"intermediate_states_buffer batch stride encodes {cache_steps} "
+            f"cache steps, fewer than logical T={T}"
         )
 
-        intermediate_states = intermediate_states_buffer.view(
-            buffer_size * cache_steps * HV, V, K
+        # Zero-copy compact alias over the backing storage. This deliberately
+        # spans the physical batch stride, including the hidden trailing cache
+        # slots of a `buffer[:, :T]` view.
+        intermediate_states = intermediate_states_buffer.as_strided(
+            size=(buffer_size * cache_steps * HV, V, K),
+            stride=(V * K, K, 1),
+            storage_offset=intermediate_states_buffer.storage_offset(),
         )
     else:
         cache_steps = T
@@ -1634,26 +1657,28 @@ def gated_delta_rule_mtp(
 
         if gdn_device_target(q.device).major != 10:
             raise ValueError("ReplaySSM caching currently requires SM100/SM103")
-        assert disable_state_update, (
-            "ReplaySSM verify must leave the checkpoint frozen "
-            "(disable_state_update=True)"
-        )
-        assert intermediate_states_buffer is None, (
-            "ReplaySSM replaces full intermediate-state snapshots"
-        )
-        assert ssm_state_indices is None, (
-            "ReplaySSM and per-token state scatter are mutually exclusive"
-        )
-        assert pool_size > 0, "ReplaySSM requires at least one checkpoint slot"
-        assert k.shape == q.shape and v.shape[:2] == (B, T), (
-            "ReplaySSM Q/K/V shapes must agree"
-        )
-        assert a.shape == b.shape == (B, T, HV), "ReplaySSM a/b must be [B,T,HV]"
-        assert A_log.shape == dt_bias.shape == (HV,), (
-            "ReplaySSM gate parameters must be [HV]"
-        )
-        assert all(
-            t.device == q.device
+        # A raise, not an assert: -O must not let verify mutate the frozen checkpoint.
+        if not disable_state_update:
+            raise ValueError(
+                "ReplaySSM verify must leave the checkpoint frozen "
+                "(disable_state_update=True)"
+            )
+        if intermediate_states_buffer is not None:
+            raise ValueError("ReplaySSM replaces full intermediate-state snapshots")
+        if ssm_state_indices is not None:
+            raise ValueError(
+                "ReplaySSM and per-token state scatter are mutually exclusive"
+            )
+        if pool_size <= 0:
+            raise ValueError("ReplaySSM requires at least one checkpoint slot")
+        if k.shape != q.shape or v.shape[:2] != (B, T):
+            raise ValueError("ReplaySSM Q/K/V shapes must agree")
+        if not (a.shape == b.shape == (B, T, HV)):
+            raise ValueError("ReplaySSM a/b must be [B,T,HV]")
+        if not (A_log.shape == dt_bias.shape == (HV,)):
+            raise ValueError("ReplaySSM gate parameters must be [HV]")
+        if any(
+            t.device != q.device
             for t in (
                 k,
                 v,
@@ -1665,14 +1690,16 @@ def gated_delta_rule_mtp(
                 initial_state_indices,
                 output,
             )
-        ), "ReplaySSM tensors must be on the query device"
-        assert K == V == 128, "ReplaySSM requires K=V=128"
-        assert H > 0 and HV > 0 and HV % H == 0, "ReplaySSM requires HV divisible by H"
-        assert initial_state_indices.shape == (B,), "initial_state_indices must be [B]"
-        assert T >= 3, f"ReplaySSM caching requires T >= 3, got T={T}"
-        assert all(t is not None for t in replayssm_buffers), (
-            "cache_replayssm=True requires replayssm_rawv/rawk/g/beta"
-        )
+        ):
+            raise ValueError("ReplaySSM tensors must be on the query device")
+        if not (K == V == 128):
+            raise ValueError("ReplaySSM requires K=V=128")
+        if H <= 0 or HV <= 0 or HV % H != 0:
+            raise ValueError("ReplaySSM requires HV divisible by H")
+        if initial_state_indices.shape != (B,):
+            raise ValueError("initial_state_indices must be [B]")
+        if T < 3:
+            raise ValueError(f"ReplaySSM caching requires T >= 3, got T={T}")
         expected_replayssm = (
             ((pool_size, HV, T, V), torch.bfloat16, "replayssm_rawv"),
             ((pool_size, H, T, K), torch.bfloat16, "replayssm_rawk"),
@@ -1682,19 +1709,24 @@ def gated_delta_rule_mtp(
         for tensor, (shape, dtype, name) in zip(
             replayssm_buffers, expected_replayssm, strict=True
         ):
-            assert tensor is not None
-            assert tensor.shape == shape, (
-                f"{name} must have shape {list(shape)}, got {tuple(tensor.shape)}"
-            )
-            assert tensor.dtype == dtype, (
-                f"{name} must have dtype {dtype}, got {tensor.dtype}"
-            )
-            assert tensor.device == q.device, (
-                f"{name} device {tensor.device} != q device {q.device}"
-            )
-            assert tensor.is_contiguous(), (
-                f"{name} must be a contiguous per-layer ReplaySSM view"
-            )
+            if tensor is None:
+                raise ValueError(
+                    "cache_replayssm=True requires replayssm_rawv/rawk/g/beta"
+                )
+            if tensor.shape != shape:
+                raise ValueError(
+                    f"{name} must have shape {list(shape)}, got {tuple(tensor.shape)}"
+                )
+            if tensor.dtype != dtype:
+                raise ValueError(f"{name} must have dtype {dtype}, got {tensor.dtype}")
+            if tensor.device != q.device:
+                raise ValueError(
+                    f"{name} device {tensor.device} != q device {q.device}"
+                )
+            if not tensor.is_contiguous():
+                raise ValueError(
+                    f"{name} must be a contiguous per-layer ReplaySSM view"
+                )
         # Contiguous views may still start at an unaligned storage offset.
         for name, tensor in (
             ("q", q),
@@ -1715,10 +1747,8 @@ def gated_delta_rule_mtp(
         ):
             if tensor is not None and tensor.data_ptr() % 16:
                 raise ValueError(f"{name} must have a 16-byte aligned base address")
-    else:
-        assert all(t is None for t in replayssm_buffers), (
-            "replayssm_* buffers require cache_replayssm=True"
-        )
+    elif any(t is not None for t in replayssm_buffers):
+        raise ValueError("replayssm_* buffers require cache_replayssm=True")
 
     # Execute kernel
     run_mtp_decode(
@@ -1757,10 +1787,9 @@ def gated_delta_rule_mtp(
         replayssm_beta=replayssm_beta,
     )
 
-    # No post-kernel scatter step: the contiguity assert above guarantees
-    # `intermediate_states` is a view of `intermediate_states_buffer`, and the
-    # `use_pool_indexing=True` path makes the kernel write the strided pool
-    # in place. Writes are visible to the caller directly.
+    # No post-kernel scatter step: `intermediate_states` aliases the caller's
+    # backing storage, and the pool-indexing path writes the strided pool in
+    # place. Writes are visible to the caller directly.
 
     # Convert output to target dtype if needed
     if output.dtype != target_dtype:

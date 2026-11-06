@@ -14,6 +14,8 @@ Requires a CUDA-capable GPU.
 
 Results:
 - We would get these example json files under fi_trace_out directory:
+qsa_forward_h12_kv1_d256.json
+qsa_indexed_forward_h12_kv1_d256.json
 alphamoe_fused_router_e512_k8_bm16_shared0.json
 alphamoe_nvfp4_aligned_moe_topk2_e4_h256_n256_bm8.json
 bmm_mxfp8_N128_K128.json
@@ -31,14 +33,22 @@ gated_residual_rmsnorm_h8192.json
 gated_residual_next_rmsnorm_h8192.json
 gated_residual_next_rmsnorm_scalar_alpha_h8192.json
 fused_add_rmsnorm_quant_h7168.json
+fmha_v2_prefill_deepseek_h96_d128.json
+fmha_v2_prefill_deepseek_h20_d256.json
 fmha_v2_prefill_sm120_h4_d128.json
+fmha_v2_prefill_sm120_h96_d128.json
+fmha_v2_prefill_sm120_h20_d256.json
 gdn_decode_qk4_v8_d128.json
+gdn_decode_paged_qk4_v8_d128.json
 gdn_fused_decode_h5120_v48_d128.json
 gdn_mtp_qk4_v8_d128.json
 gdn_replayssm_commit_k2_v8_d128.json
 gdn_prefill_qk4_v8_d128.json
+gdn_prefill_gates_q4_k4_v8_d128.json
+gdn_prefill_paged_q4_k4_v8_d128_ps64.json
 gdn2_prefill_qk4_v8_d128.json
 gdp_prefill_n2_qk4_v8_d128.json
+group_union_masks_top_k2048.json
 recurrent_kda_q8_v16_d128.json
 packed_kda_decode_h12_d128.json
 fused_kda_decode_h12_d128.json
@@ -72,6 +82,7 @@ minimax_h3_nvfp4_pre_attention_p8_hdst7_d128.json
 minimax_h3_qkv_quantize_pack_p8_hdst7_d128_pk64.json
 mla_paged_decode_h16_ckv512_kpe64_ps1.json
 mla_paged_decode_h16_ckv512_kpe64_ps64.json
+mla_swa_decode_sq1_h64_d1088_dv1024_ps64.json
 attention_ts_decode_tuple_multi_q_sq4_h32_kv4_d128_ps32.json
 prims_ts_decode_wrapper_tuple_multi_q_causal_sq4_maxq4_maxk2048_wl-1_pf0_um0_h32_kv4_d128_ps32.json
 prims_ts_decode_wrapper_tuple_multi_q_causal_plan_seq_lens_sq4_maxq4_maxk2048_wl-1_pf1_um1_h32_kv4_d128_ps32.json
@@ -128,15 +139,20 @@ rmsnorm_h7168.json
 rmsnorm_sigmoid_gate_nh32_h64.json
 rmsnorm_quant_h7168.json
 silu_and_mul_h16384.json
+silu_and_mul_mxfp8_experts_quantize_k8192.json
 silu_and_mul_nvfp4_quantize_k16384.json
+token_sparse_kv_indices_top_k2048_lists2.json
 top_k_sampling_v128256.json
 top_k_top_p_sampling_v128256.json
 top_k_top_p_sampling_v151936.json
+top_k_varlen_n4096_k512.json
+top_k_varlen_n8192_k1024.json
 top_p_sampling_v128256.json
 top_p_sampling_v151936.json
 trtllm_bf16_moe_topk2_e8_h1024_i512.json
 trtllm_bf16_routed_moe_topk2_e8_h1024.json
 trtllm_fp4_block_scale_routed_moe_topk2_e8_h1024_act3.json
+trtllm_fp4_block_scale_routed_moe_topk2_e8_h1024_act3_r4o61.json
 trtllm_fp8_block_scale_routed_moe_topk2_e8_h1024.json
 trtllm_fp8_per_tensor_scale_moe_topk2_e8_h1024_i512.json
 trtllm_fp8_per_tensor_scale_routed_moe_topk8_e32_h7168.json
@@ -145,6 +161,9 @@ moe_layer_cudnn_frost_bf16.json
 moe_layer_cudnn_frost_mxfp8.json
 moe_layer_cudnn_frost_nvfp4.json
 moe_layer_cudnn_frost_mxfp8_mxfp4.json
+ulysses_exchange_chunks_ws1_c128.json
+ulysses_gather_heads_ws1_d128.json
+ulysses_scatter_heads_ws1_d128.json
 
 Note: top_p_sampling files appear for vocab_size=151936 because
 top_k_top_p_sampling calls top_p_sampling internally.
@@ -154,7 +173,9 @@ MSA (msa_*) files require SM120/SM121 (consumer Blackwell) GPUs.
 dsv41_fp4_quantize_*_sparse_mla_cache_*.json and dsv41_fp8_quantize_*_sparse_mla_cache_*.json
 are only generated on SM120/SM121 GPUs.
 trtllm_batch_decode_block_sparse_h16_kv2_d128_ps16.json requires SM100/SM103 GPUs.
+trtllm_batch_decode_token_sparse_h16_kv1_d256_ps1_topk512.json requires SM100/SM103 GPUs.
 trtllm_gen_routing_e256_k8_t8.json requires SM100/SM103/SM120/SM121 GPUs.
+top_k_varlen_n4096_k512.json (windowed prefill mode, gvr_2) requires SM100/SM103/SM107 GPUs.
 """
 
 import contextlib
@@ -172,10 +193,12 @@ os.environ.setdefault("FLASHINFER_TRACE_DUMP", "1")
 SAVE_DIR = Path(os.environ["FLASHINFER_TRACE_DUMP_DIR"])
 
 import torch
+import torch.distributed as dist
 
 import flashinfer
 import flashinfer.activation
 import flashinfer.cascade
+import flashinfer.comm
 import flashinfer.fused_moe
 import flashinfer.gdn_decode
 import flashinfer.gemm
@@ -205,16 +228,37 @@ from flashinfer.mla import BatchMLAPagedAttentionWrapper
 from flashinfer.prefill import (
     BatchPrefillWithPagedKVCacheWrapper,
     BatchPrefillWithRaggedKVCacheWrapper,
+    fmha_v2_prefill_deepseek,
     fmha_v2_prefill_sm120,
 )
 from flashinfer.prims_ts.moe import MoePartitionResources
 from flashinfer.utils import is_sm100a_supported
 from tests.trace.example_moe_layer import generate as generate_moe_layer_traces
+from tests.utils_fp8 import to_float8
 
 # Public MoELayer pack schemas, including all four Frost quantization formats.
 generate_moe_layer_traces(SAVE_DIR)
 
 device = "cuda"
+
+# Metadata-only SM90 MLA+SWA example, also usable without SM90 hardware.
+from flashinfer.mla import (
+    batch_decode_with_kv_cache_mla_swa,
+    get_mla_swa_workspace_size_bytes,
+)
+
+batch_decode_with_kv_cache_mla_swa.fi_trace(
+    save_dir=SAVE_DIR,
+    query=torch.empty((1, 1, 64, 1088), device="meta", dtype=torch.bfloat16),
+    kv_cache=torch.empty((9, 64, 1088), device="meta", dtype=torch.bfloat16),
+    workspace_buffer=torch.empty(
+        get_mla_swa_workspace_size_bytes(1, 1), device="meta", dtype=torch.uint8
+    ),
+    block_tables=torch.empty((1, 9), device="meta", dtype=torch.int32),
+    seq_lens=torch.empty((1,), device="meta", dtype=torch.int32),
+    window_left=512,
+    sm_scale=0.0625,
+)
 WORKSPACE = 128 * 1024 * 1024  # 128 MB
 
 # PCIe traces need only world_size and tensor metadata, not an IPC allocation
@@ -450,6 +494,37 @@ flashinfer.apply_rope_with_cos_sin_cache_inplace(
 )
 
 
+def example_qsa():
+    capability = torch.cuda.get_device_capability(device)
+    if capability not in ((10, 0), (10, 3), (10, 7)):
+        print("Skipping QSA examples: requires SM100/SM103/SM107")
+        return
+    q = torch.randn(8, 12, 256, dtype=torch.bfloat16, device=device)
+    k = torch.randn(8, 1, 256, dtype=torch.bfloat16, device=device)
+    v = torch.randn_like(k)
+    token = torch.arange(8, device=device, dtype=torch.int32)
+    zeros = torch.zeros_like(token)
+    first = torch.tensor([0, 4], device=device, dtype=torch.int32)
+    flashinfer.qsa_forward(
+        q,
+        k,
+        v,
+        torch.ones(8, 2, device=device, dtype=torch.uint8),
+        zeros,
+        token,
+        zeros,
+        zeros,
+        first,
+        first + 3,
+    )
+    if capability in ((10, 0), (10, 3)):
+        indices = torch.where(token[None, :] <= token[:, None], token[None, :], -1)
+        flashinfer.qsa_indexed_forward(q, k, v, indices)
+
+
+example_qsa()
+
+
 def example_dsv41_fp4_cache():
     from flashinfer.mla import (
         dsv41_fp4_quantize_append_sparse_mla_cache,
@@ -507,6 +582,7 @@ from flashinfer.quantization.fp4_quantization import (
 from flashinfer.quantization.fp8_quantization import (
     mxfp8_grouped_quantize,
     mxfp8_quantize,
+    silu_and_mul_mxfp8_experts_quantize,
 )
 
 quant_M, quant_K = 128, 4096
@@ -607,6 +683,12 @@ with contextlib.suppress(Exception):
     grouped_a = torch.randn(2, 256, quant_K, dtype=torch.bfloat16, device=device)
     grouped_mask = torch.full((2,), 256, dtype=torch.int32, device=device)
     mxfp8_grouped_quantize(grouped_a, grouped_mask)
+
+# Fused SiLU + mul + masked MXFP8 (SM100+): [B, M, 2K] -> masked grouped GEMM layout.
+with contextlib.suppress(Exception):
+    experts_a = torch.randn(2, 256, 2 * quant_K, dtype=torch.bfloat16, device=device)
+    experts_mask = torch.full((2,), 256, dtype=torch.int32, device=device)
+    silu_and_mul_mxfp8_experts_quantize(experts_a, experts_mask)
 
 # ── Single-request attention (non-batched) ───────────────────────────────────
 sa_Hq, sa_Hk, sa_D, sa_KV = 32, 8, 128, 256
@@ -1105,6 +1187,31 @@ with contextlib.suppress(Exception):
     flashinfer.gdn_prefill.chunk_gated_delta_rule(
         gp_q, gp_k, gp_v, cu_seqlens=cu_seqlens
     )
+
+# ── GDN raw gate fusion (trace-only; no optional cuDNN dependency) ───────────
+from flashinfer.trace.templates.gdn import gdn_prefill_trace
+
+flashinfer.gdn_prefill.chunk_gated_delta_rule.fi_trace(
+    **gdn_prefill_trace(use_gate_in_kernel=True).init(total_seq_len=256, device=device),
+    backend="cudnn",
+    save_dir=SAVE_DIR,
+)
+
+# ── GDN on a paged recurrent-state pool (trace-only) ─────────────────────────
+import flashinfer.gdn_paged
+from flashinfer.trace.templates.gdn import (
+    gdn_decode_paged_trace,
+    gdn_prefill_paged_trace,
+)
+
+flashinfer.gdn_paged.chunk_gated_delta_rule_paged.fi_trace(
+    **gdn_prefill_paged_trace.init(total_seq_len=256, page_size=64, device=device),
+    save_dir=SAVE_DIR,
+)
+flashinfer.gdn_paged.gated_delta_rule_decode_paged.fi_trace(
+    **gdn_decode_paged_trace.init(batch_size=4, page_size=64, device=device),
+    save_dir=SAVE_DIR,
+)
 
 # ── GDN-2 prefill (channel-wise gates, chunk prefill) ────────────────────────
 with contextlib.suppress(Exception):
@@ -2066,6 +2173,19 @@ flashinfer.prims_ts_fp4_block_scale_routed_moe.fi_trace(
     topk_ids=_pts_moe_packed_topk,
     **_pts_moe_fp4_common,
 )
+from flashinfer.quantization.nvfp4_quantization_utils import (  # noqa: E402
+    NVFP44Over6Config,
+)
+
+# An explicit 4over6 recipe adds the derived nvfp4_4over6 axis (r4o6 + wire
+# code, 1 for the default recipe); the definitions above leave it unset and so
+# carry no such axis.
+flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe.fi_trace(
+    topk_ids=_pts_moe_packed_topk,
+    per_token_scale=torch.ones(_pts_moe_T, dtype=torch.float32, device=device),
+    nvfp4_4over6=NVFP44Over6Config(),
+    **_pts_moe_fp4_common,
+)
 
 # Partitioned Prims-TS APIs consume two prepared MajorK shards and caller-owned
 # streams. Use TP-N/TP-K here so FC1 is split by output rows while FC2 is split
@@ -2817,6 +2937,20 @@ with contextlib.suppress(Exception):
     )
     trtllm_batch_decode_with_kv_cache(**_tbs_inputs)
 
+# trtllm_batch_decode_with_kv_cache with token-sparse attention (each query
+# token attends to its own K and V slot lists; SM100/103 only).
+with contextlib.suppress(Exception):
+    from flashinfer.decode import trtllm_batch_decode_with_kv_cache
+    from flashinfer.trace.templates.attention import (
+        _trtllm_batch_decode_token_sparse_init,
+    )
+
+    trtllm_batch_decode_with_kv_cache(
+        **_trtllm_batch_decode_token_sparse_init(
+            num_tokens=4, num_heads=16, head_dim=256, sparse_top_k=512, device=device
+        )
+    )
+
 # concat_mla_k (DeepSeek MLA K concat, fixed shape per docstring).
 with contextlib.suppress(Exception):
     from flashinfer.concat_ops import concat_mla_k as _concat_mla_k
@@ -2994,7 +3128,7 @@ with contextlib.suppress(Exception):
     )
 
 # ── SM120 FP8 self-attention with separate Q/K/V ─────────────────────────────
-if torch.cuda.get_device_capability() == (12, 0):
+if torch.cuda.get_device_capability() in ((12, 0), (12, 1)):
     _fmha_B, _fmha_S, _fmha_H, _fmha_D = 1, 128, 4, 128
     _fmha_shape = (_fmha_B, _fmha_S, _fmha_H, _fmha_D)
     _fmha_q = torch.randn(_fmha_shape, dtype=torch.bfloat16, device=device)
@@ -3029,6 +3163,71 @@ if torch.cuda.get_device_capability() == (12, 0):
         scale_bmm1_d=_fmha_scale_bmm1_d,
         scale_bmm2_d=_fmha_scale_bmm2_d,
         causal=True,
+    )
+
+    # GLM-4.7 has 96 query heads and 8 KV heads, each with head dimension 128.
+    _glm47_q, _glm47_q_scale = to_float8(
+        torch.randn((1, 128, 96, 128), dtype=torch.bfloat16, device=device)
+    )
+    _glm47_k, _glm47_k_scale = to_float8(
+        torch.randn((1, 128, 8, 128), dtype=torch.bfloat16, device=device)
+    )
+    _glm47_v, _glm47_v_scale = to_float8(
+        torch.randn((1, 128, 8, 128), dtype=torch.bfloat16, device=device)
+    )
+    _glm47_bmm1_scale = (_glm47_q_scale * _glm47_k_scale).item() / (128**0.5)
+    _glm47_bmm2_scale = _glm47_v_scale.item()
+    fmha_v2_prefill_deepseek(
+        _glm47_q,
+        _glm47_k,
+        _glm47_v,
+        torch.empty((1, 128, 96, 128), dtype=torch.bfloat16, device=device),
+        num_heads=96,
+        head_dim=128,
+        seq_len=128,
+        scale_softmax=1.0,
+        scale_bmm1=_glm47_bmm1_scale,
+        scale_bmm2=_glm47_bmm2_scale,
+        scale_bmm1_d=torch.tensor(
+            [_glm47_bmm1_scale], dtype=torch.float32, device=device
+        ),
+        scale_bmm2_d=torch.tensor(
+            [_glm47_bmm2_scale], dtype=torch.float32, device=device
+        ),
+    )
+
+    # MLA context uses expanded per-head Q/K/V, not the compressed latent cache.
+    _glm47_flash_shape = (1, 128, 20, 256)
+    _glm47_flash_q, _glm47_flash_q_scale = to_float8(
+        torch.randn(_glm47_flash_shape, dtype=torch.bfloat16, device=device)
+    )
+    _glm47_flash_k, _glm47_flash_k_scale = to_float8(
+        torch.randn(_glm47_flash_shape, dtype=torch.bfloat16, device=device)
+    )
+    _glm47_flash_v, _glm47_flash_v_scale = to_float8(
+        torch.randn(_glm47_flash_shape, dtype=torch.bfloat16, device=device)
+    )
+    _glm47_flash_bmm1_scale = (_glm47_flash_q_scale * _glm47_flash_k_scale).item() / (
+        256**0.5
+    )
+    _glm47_flash_bmm2_scale = _glm47_flash_v_scale.item()
+    fmha_v2_prefill_deepseek(
+        _glm47_flash_q,
+        _glm47_flash_k,
+        _glm47_flash_v,
+        torch.empty(_glm47_flash_shape, dtype=torch.bfloat16, device=device),
+        num_heads=20,
+        head_dim=256,
+        seq_len=128,
+        scale_softmax=1.0,
+        scale_bmm1=_glm47_flash_bmm1_scale,
+        scale_bmm2=_glm47_flash_bmm2_scale,
+        scale_bmm1_d=torch.tensor(
+            [_glm47_flash_bmm1_scale], dtype=torch.float32, device=device
+        ),
+        scale_bmm2_d=torch.tensor(
+            [_glm47_flash_bmm2_scale], dtype=torch.float32, device=device
+        ),
     )
 
 # ── Minimax Sparse Attention (MSA) numeric ops (SM120/SM121) ─────────────────
@@ -3178,3 +3377,107 @@ with contextlib.suppress(Exception):
             _fp4_in["seq_lens"],
             _fp4_in["max_seq_len"],
         )
+
+# ── top_k_varlen (DeepSeek sparse-attention indexer top-k) ─────────────────
+# decode shape: one row per request, per-request lengths; the radix_cutlass
+# backend runs on any GPU -> top_k_varlen_n8192_k1024.json
+from flashinfer.trace.templates.topk import top_k_varlen_trace as _tkv_trace
+
+_tkv_in = _tkv_trace.init(batch_size=32, max_seq_len=8192, top_k=1024, device=device)
+flashinfer.top_k_varlen(**_tkv_in)
+
+# windowed (prefill) shape: one row per prompt token, every request's keys
+# packed along the column axis, row r ranks [row_starts[r], row_starts[r] +
+# seq_lens[r]) and returns absolute columns; served by the gvr_2 engines
+# (SM100/SM103/SM107) -> top_k_varlen_n4096_k512.json
+_tkv_cc = torch.cuda.get_device_capability()
+if flashinfer.top_k_varlen.is_backend_supported("gvr_2", _tkv_cc[0] * 10 + _tkv_cc[1]):
+    _tkv_R, _tkv_L = 2, 2048  # two 2048-token prompts
+    _tkv_logits = torch.randn(
+        _tkv_R * _tkv_L, _tkv_R * _tkv_L, dtype=torch.float32, device=device
+    )
+    _tkv_starts = torch.tensor(
+        [(r * _tkv_L) for r in range(_tkv_R) for _ in range(_tkv_L)],
+        dtype=torch.int32,
+        device=device,
+    )
+    _tkv_lens = torch.tensor(
+        [i + 1 for _ in range(_tkv_R) for i in range(_tkv_L)],
+        dtype=torch.int32,
+        device=device,
+    )
+    flashinfer.top_k_varlen(
+        _tkv_logits,
+        _tkv_lens,
+        512,
+        row_starts=_tkv_starts,
+        max_window_len=_tkv_L,
+        absolute_indices=True,
+        backend="gvr_2",
+    )
+
+# ── Ulysses layout transforms (single-rank trace reference) ──────────────────
+# The trace template intentionally models world_size=1. Multi-rank data movement
+# is covered by tests/comm and cannot be represented by a single-process
+# flashinfer-bench reference function.
+_ulysses_owns_process_group = False
+try:
+    # Only the process-group bring-up is allowed to fail quietly: it is the one
+    # step this script cannot assume (no NCCL, no CUDA). A communicator or
+    # collective that fails after that is a real defect, and suppressing it
+    # would let this script exit 0 having silently skipped the Ulysses traces.
+    if not dist.is_initialized():
+        with contextlib.suppress(Exception):
+            dist.init_process_group(
+                "nccl", store=dist.HashStore(), rank=0, world_size=1
+            )
+            _ulysses_owns_process_group = True
+    if dist.is_initialized() and dist.get_world_size() == 1:
+        _ulysses_x = torch.randn(1, 128, 8, 128, dtype=torch.bfloat16, device=device)
+        with flashinfer.comm.UlyssesCommunicator(
+            max_bytes=_ulysses_x.nbytes,
+            dtype=_ulysses_x.dtype,
+            backend="nccl",
+            device=_ulysses_x.device,
+        ) as _ulysses_comm:
+            _ulysses_comm.scatter_heads(_ulysses_x)
+            _ulysses_comm.gather_heads(_ulysses_x)
+        # Chunk exchange takes [1, 1, world_size, chunk], so it needs its own
+        # operand rather than a view of the head-major one above.
+        _ulysses_chunks = torch.randn(1, 1, 1, 128, dtype=torch.bfloat16, device=device)
+        with flashinfer.comm.UlyssesCommunicator(
+            max_bytes=_ulysses_chunks.nbytes,
+            dtype=_ulysses_chunks.dtype,
+            backend="nccl",
+            device=_ulysses_chunks.device,
+        ) as _ulysses_chunk_comm:
+            _ulysses_chunk_comm.exchange_chunks(_ulysses_chunks)
+finally:
+    if _ulysses_owns_process_group:
+        dist.destroy_process_group()
+
+# ── Token-sparse attention inputs: K/V slot lists, group unions and masks ─────
+from flashinfer.token_sparse import group_union_masks, token_sparse_kv_indices
+
+token_sparse_kv_indices.fi_trace(
+    save_dir=SAVE_DIR,
+    positions=torch.empty(4, 2048, dtype=torch.int32),
+    requests=torch.zeros(4, dtype=torch.int32),
+    block_table=torch.empty(2, 64, dtype=torch.int32),
+    block_tables=torch.empty(8, 2, 2048, dtype=torch.int32),
+    seq_lens=torch.empty(8, dtype=torch.int32),
+    requests_per_token=2,
+)
+
+group_union_masks.fi_trace(
+    save_dir=SAVE_DIR,
+    positions=torch.empty(8, 2048, dtype=torch.int32),
+    query_rows=torch.arange(8, dtype=torch.int32),
+    group_unions=torch.arange(2, dtype=torch.int32),
+    requests=torch.zeros(2, dtype=torch.int32),
+    block_table=torch.empty(1, 256, dtype=torch.int32),
+    union=torch.empty(2, 8192, dtype=torch.int32),
+    union_sizes=torch.empty(2, dtype=torch.int32),
+    mask=torch.empty(8, 256, dtype=torch.int32),
+    num_keys=16384,
+)

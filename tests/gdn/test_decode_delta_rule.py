@@ -24,7 +24,8 @@ import random
 import torch
 import pytest
 
-pytestmark = pytest.mark.long_running
+# H100 CI peak GPU memory: 43.0 GiB.
+pytestmark = [pytest.mark.long_running, pytest.mark.gpu_exclusive]
 
 
 try:
@@ -44,12 +45,17 @@ from flashinfer.gdn_decode import (
     gated_delta_rule_mtp,
 )
 from flashinfer.utils import get_compute_capability
+from tests.test_helpers.parametrize import (
+    parametrize_product,
+    pairwise_product_cases,
+)
 
 # Import BF16 state kernels (T=1 and MTP)
 try:
     from flashinfer.gdn_kernels.gdn_decode_bf16_state import (
         gated_delta_rule as gdn_decode_bf16_state,
         gated_delta_rule_mtp as gdn_decode_bf16_state_mtp,
+        gated_delta_rule_t1_wide_vec as gdn_decode_bf16_state_t1_wide_vec,
     )
 
     GDN_DECODE_BF16_STATE_AVAILABLE = True
@@ -1326,6 +1332,150 @@ def test_verify_kernel_mtp_reuses_compile_across_cache_modes(monkeypatch, batch_
     finally:
         gdn_decode_mtp._get_compiled_mtp_kernel.cache_clear()
         gdn_decode_mtp._get_compiled_mtp_kernel_inline.cache_clear()
+
+
+def _saturating_softplus_inputs(batch, seq_len=4, heads=2, value_heads=8):
+    torch.manual_seed(42)
+    device = "cuda"
+
+    def rand(*shape, dtype=torch.bfloat16):
+        return torch.randn(*shape, dtype=dtype, device=device) * 0.1
+
+    a = rand(batch, seq_len, value_heads)
+    # softplus_beta * (a + dt_bias) beyond ~88 overflows the FP32 exp.
+    a[:, 0].fill_(100.0)
+    return dict(
+        q=rand(batch, seq_len, heads, 128),
+        k=rand(batch, seq_len, heads, 128),
+        v=rand(batch, seq_len, value_heads, 128),
+        initial_state=rand(batch + 3, value_heads, 128, 128, dtype=torch.float32),
+        initial_state_indices=torch.arange(batch, dtype=torch.int32, device=device),
+        A_log=rand(value_heads, dtype=torch.float32),
+        a=a,
+        dt_bias=rand(value_heads, dtype=torch.float32),
+        b=rand(batch, seq_len, value_heads),
+        disable_state_update=True,
+        use_qk_l2norm=True,
+        scale=0.37,
+    )
+
+
+@pytest.mark.parametrize("batch_size", [16, 17], ids=["inline", "warp_specialized"])
+def test_verify_kernel_mtp_saturating_softplus(batch_size):
+    """A saturating softplus must not depend on which MTP kernel B selects."""
+    from flashinfer.trace.templates.gdn import _gdn_mtp_reference
+
+    _skip_if_not_sm90_or_later()
+    value_heads = 8
+    inline = (batch_size * value_heads) <= 128
+    assert inline == (batch_size == 16), "batch sizes must straddle the selector"
+    args = _saturating_softplus_inputs(batch_size)
+    output, _ = gated_delta_rule_mtp(**args)
+    reference, _ = _gdn_mtp_reference(**args)
+    assert torch.isfinite(output).all(), (
+        f"{torch.isnan(output).float().mean().item():.1%} of the output is NaN"
+    )
+    torch.testing.assert_close(output.float(), reference.float(), atol=1e-2, rtol=1e-2)
+
+
+def test_verify_kernel_mtp_saturating_softplus_matches_inline():
+    """Both MTP kernels must agree once the softplus branch is taken."""
+    _skip_if_not_sm90_or_later()
+    value_heads = 8
+    args = _saturating_softplus_inputs(17, value_heads=value_heads)
+    assert 16 * value_heads <= 128 < 17 * value_heads
+    warp_out, _ = gated_delta_rule_mtp(**args)
+    inline_args = {
+        name: value[:16]
+        if torch.is_tensor(value) and value.shape[:1] == (17,)
+        else value
+        for name, value in args.items()
+    }
+    inline_out, _ = gated_delta_rule_mtp(**inline_args)
+    torch.testing.assert_close(warp_out[:16], inline_out, atol=1e-3, rtol=1e-2)
+
+
+def _saturating_bf16_state_inputs(batch, seq_len, heads=2, value_heads=8):
+    torch.manual_seed(42)
+    device = "cuda"
+
+    def rand(*shape, dtype=torch.bfloat16):
+        return torch.randn(*shape, dtype=dtype, device=device) * 0.1
+
+    a = rand(batch, seq_len, value_heads)
+    a[:, 0].fill_(100.0)
+    return dict(
+        A_log=rand(value_heads, dtype=torch.float32),
+        a=a,
+        dt_bias=rand(value_heads, dtype=torch.float32),
+        q=rand(batch, seq_len, heads, 128),
+        k=rand(batch, seq_len, heads, 128),
+        v=rand(batch, seq_len, value_heads, 128),
+        b=rand(batch, seq_len, value_heads),
+        initial_state_source=rand(batch + 3, value_heads, 128, 128),
+        initial_state_indices=torch.arange(batch, dtype=torch.int32, device=device),
+        scale=0.37,
+    )
+
+
+def _saturating_bf16_state_reference(args):
+    """Step the fp32 reference over the bf16 pool rows the kernel reads."""
+    state = args["initial_state_source"][args["initial_state_indices"].long()]
+    state = state.transpose(-2, -1).contiguous()
+    outputs = []
+    for t in range(args["q"].shape[1]):
+        o_t, state = decode_delta_rule(
+            args["q"][:, t].float(),
+            args["k"][:, t].float(),
+            args["v"][:, t].float(),
+            state,
+            A_log=args["A_log"],
+            a=args["a"][:, t],
+            dt_bias=args["dt_bias"],
+            b=args["b"][:, t],
+            scale_factor=args["scale"],
+            softplus_beta=1.0,
+            softplus_threshold=20.0,
+            use_l2_norm=True,
+            state_dtype=torch.bfloat16,
+        )
+        outputs.append(o_t)
+    return torch.stack(outputs, dim=1)
+
+
+@pytest.mark.parametrize(
+    "batch_size", [8, 16, 17], ids=["ilp4", "wide_vec_128", "wide_vec"]
+)
+def test_gdn_decode_bf16_state_mtp_saturating_softplus(batch_size):
+    """Same guard on the bf16-state MTP kernels, across their B*HV dispatch."""
+    _skip_if_not_sm90_or_later()
+    if not GDN_DECODE_BF16_STATE_AVAILABLE:
+        pytest.skip("gdn_decode_bf16_state not available")
+    args = _saturating_bf16_state_inputs(batch_size, 4)
+    output = gdn_decode_bf16_state_mtp(
+        **args, disable_state_update=True, use_qk_l2norm_in_kernel=True
+    )
+    assert torch.isfinite(output).all(), (
+        f"{torch.isnan(output).float().mean().item():.1%} of the output is NaN"
+    )
+    torch.testing.assert_close(
+        output.float(), _saturating_bf16_state_reference(args), atol=1e-3, rtol=5e-3
+    )
+
+
+@pytest.mark.parametrize("batch_size", [8, 64], ids=["ilp4_t1", "wide_vec_t1"])
+def test_gdn_decode_bf16_state_t1_saturating_softplus(batch_size):
+    _skip_if_not_sm90_or_later()
+    if not GDN_DECODE_BF16_STATE_AVAILABLE:
+        pytest.skip("gdn_decode_bf16_state not available")
+    args = _saturating_bf16_state_inputs(batch_size, 1)
+    output = gdn_decode_bf16_state(**args, use_qk_l2norm_in_kernel=True)
+    assert torch.isfinite(output).all(), (
+        f"{torch.isnan(output).float().mean().item():.1%} of the output is NaN"
+    )
+    torch.testing.assert_close(
+        output.float(), _saturating_bf16_state_reference(args), atol=1e-3, rtol=5e-3
+    )
 
 
 # ============================================================================
@@ -2714,15 +2864,17 @@ def test_gdn_decode_bf16_state_recovery_per_request_k(
 # Verifies bit-equivalence (within BF16 noise) against the two-call reference.
 
 
-@pytest.mark.parametrize("recovery_steps", [1, "T-1"])
-@pytest.mark.parametrize("T", [8])
-@pytest.mark.parametrize("batch_size", [2, 8, 32])
-@pytest.mark.parametrize(
-    "num_q_heads, num_k_heads, num_v_heads",
-    [(16, 16, 64)],
+@parametrize_product(
+    {
+        "recovery_steps": [1, "T-1"],
+        "T": [8],
+        "batch_size": [2, 8, 32],
+        "num_q_heads,num_k_heads,num_v_heads": [(16, 16, 64)],
+        "head_size": [128],
+        "dtype": ["bfloat16"],
+    },
+    regular=pairwise_product_cases,
 )
-@pytest.mark.parametrize("head_size", [128])
-@pytest.mark.parametrize("dtype", ["bfloat16"])
 def test_gdn_decode_bf16_state_fused_recovery_decode(
     dtype: str,
     head_size: int,
@@ -3576,6 +3728,225 @@ def test_gdn_decode_bf16_state_mtp_pool_larger_than_batch(
 
 
 # ==============================================================================
+# Cache-step stride regression: a logical T view may have a larger batch stride.
+# ==============================================================================
+
+
+@pytest.mark.parametrize("cache_form", ["view", "padded", "offset"])
+@pytest.mark.parametrize(
+    "state_dtype,batch_size,num_v_heads,num_tokens",
+    [
+        pytest.param(torch.float32, 2, 64, 2, id="fp32-inline"),
+        pytest.param(torch.float32, 3, 64, 2, id="fp32-warp"),
+        pytest.param(torch.bfloat16, 2, 32, 2, id="bf16-ilp4"),
+        pytest.param(torch.bfloat16, 2, 64, 2, id="bf16-wide-vec"),
+        pytest.param(torch.bfloat16, 2, 64, 1, id="bf16-t1-wide-vec"),
+    ],
+)
+def test_gdn_decode_mtp_cache_steps_stride(
+    state_dtype: torch.dtype,
+    batch_size: int,
+    num_v_heads: int,
+    num_tokens: int,
+    cache_form: str,
+):
+    """Honor the physical cache stride of a padded cache.
+
+    ``cache_form="view"`` passes the leading view ``cache[:, :T]``;
+    ``cache_form="padded"`` passes the ``[B, cache_steps, HV, V, K]``
+    allocation directly with ``cache_steps > T``; ``cache_form="offset"``
+    passes ``cache[1:1 + B, :T]`` of a ``B + 1``-row allocation, so the view
+    also carries a non-zero storage offset. The old flat index used
+    ``i_n * T * HV`` and ignored the larger batch stride in both forms (and
+    the BF16 wrappers wrote a non-contiguous view into a throwaway copy). For
+    B > 1 that packed batch 1 into batch 0's trailing slots and left batch 1's
+    requested slots unwritten. Compare against an exact-T cache and require
+    the hidden trailing slots to remain bit-exact sentinels across every
+    FP32/BF16 MTP kernel route.
+    """
+    _skip_if_not_sm90_or_later()
+    if state_dtype == torch.bfloat16 and not GDN_DECODE_BF16_STATE_AVAILABLE:
+        pytest.skip("BF16 state kernel not available")
+
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    B, T, cache_steps = batch_size, num_tokens, 4
+    H, HV, K, V = 16, num_v_heads, 128, 128
+
+    q = torch.randn(B, T, H, K, dtype=torch.bfloat16, device=device)
+    k = torch.randn(B, T, H, K, dtype=torch.bfloat16, device=device)
+    v = torch.randn(B, T, HV, V, dtype=torch.bfloat16, device=device)
+    a = torch.randn(B, T, HV, dtype=torch.bfloat16, device=device)
+    b = torch.randn(B, T, HV, dtype=torch.bfloat16, device=device)
+    A_log = torch.randn(HV, dtype=torch.float32, device=device)
+    dt_bias = torch.randn(HV, dtype=torch.float32, device=device)
+    initial_state = torch.randn(B, HV, V, K, dtype=state_dtype, device=device)
+    initial_state_indices = torch.arange(B, dtype=torch.int32, device=device)
+
+    cache_exact = torch.zeros(B, T, HV, V, K, dtype=state_dtype, device=device)
+    sentinel = 7.0
+    extra_rows = 1 if cache_form == "offset" else 0
+    cache_backing = torch.full(
+        (B + extra_rows, cache_steps, HV, V, K),
+        sentinel,
+        dtype=state_dtype,
+        device=device,
+    )
+    # [B, cache_steps, HV, V, K]; a non-zero storage offset when extra_rows.
+    cache_rows = cache_backing[extra_rows:]
+    cache_view = cache_rows[:, :T]
+    assert cache_view.shape == cache_exact.shape
+    assert cache_view.stride(0) == cache_steps * HV * V * K
+    assert not cache_view.is_contiguous()
+    if cache_form == "padded":
+        # Padded allocation passed directly: logical dim 1 exceeds T and only
+        # steps [0, T) of each batch row may be written.
+        cache_under_test = cache_rows
+        assert cache_under_test.shape[1] == cache_steps > T
+        assert cache_under_test.is_contiguous()
+    else:
+        cache_under_test = cache_view
+        assert (
+            cache_under_test.storage_offset() == extra_rows * cache_steps * HV * V * K
+        )
+
+    common = dict(
+        A_log=A_log,
+        a=a,
+        dt_bias=dt_bias,
+        q=q,
+        k=k,
+        v=v,
+        b=b,
+        initial_state_indices=initial_state_indices,
+        scale=K**-0.5,
+        disable_state_update=False,
+    )
+
+    if state_dtype == torch.float32:
+        out_exact, _ = gated_delta_rule_mtp(
+            **common,
+            initial_state=initial_state.clone(),
+            intermediate_states_buffer=cache_exact,
+            use_qk_l2norm=True,
+        )
+        out_padded, _ = gated_delta_rule_mtp(
+            **common,
+            initial_state=initial_state.clone(),
+            intermediate_states_buffer=cache_under_test,
+            use_qk_l2norm=True,
+        )
+    elif T == 1:
+        out_exact = gdn_decode_bf16_state_t1_wide_vec(
+            **common,
+            initial_state_source=initial_state.clone(),
+            intermediate_states_buffer=cache_exact,
+            use_qk_l2norm_in_kernel=True,
+        )
+        out_padded = gdn_decode_bf16_state_t1_wide_vec(
+            **common,
+            initial_state_source=initial_state.clone(),
+            intermediate_states_buffer=cache_under_test,
+            use_qk_l2norm_in_kernel=True,
+        )
+    else:
+        out_exact = gdn_decode_bf16_state_mtp(
+            **common,
+            initial_state_source=initial_state.clone(),
+            intermediate_states_buffer=cache_exact,
+            use_qk_l2norm_in_kernel=True,
+        )
+        out_padded = gdn_decode_bf16_state_mtp(
+            **common,
+            initial_state_source=initial_state.clone(),
+            intermediate_states_buffer=cache_under_test,
+            use_qk_l2norm_in_kernel=True,
+        )
+
+    torch.cuda.synchronize()
+    torch.testing.assert_close(out_padded, out_exact, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(cache_view, cache_exact, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(
+        cache_rows[:, T:],
+        torch.full_like(cache_rows[:, T:], sentinel),
+        atol=0,
+        rtol=0,
+    )
+    if extra_rows:
+        # Rows before the batch slice must stay untouched.
+        assert torch.equal(
+            cache_backing[:extra_rows],
+            torch.full_like(cache_backing[:extra_rows], sentinel),
+        )
+
+
+def test_gdn_decode_bf16_dense_cache_int64_boundary():
+    """Dense BF16 cache addressing must remain 64-bit beyond 2**31 elements."""
+    _skip_if_not_sm90_or_later()
+    if not GDN_DECODE_BF16_STATE_AVAILABLE:
+        pytest.skip("BF16 state kernel not available")
+
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    B, T, cache_steps = 257, 1, 8
+    H, HV, K, V = 1, 64, 128, 128
+
+    q = torch.randn(B, T, H, K, dtype=torch.bfloat16, device=device)
+    k = torch.randn(B, T, H, K, dtype=torch.bfloat16, device=device)
+    v = torch.randn(B, T, HV, V, dtype=torch.bfloat16, device=device)
+    a = torch.randn(B, T, HV, dtype=torch.bfloat16, device=device)
+    b = torch.randn(B, T, HV, dtype=torch.bfloat16, device=device)
+    A_log = torch.randn(HV, dtype=torch.float32, device=device)
+    dt_bias = torch.randn(HV, dtype=torch.float32, device=device)
+    state = torch.randn(1, HV, V, K, dtype=torch.bfloat16, device=device)
+    state_indices = torch.zeros(B, dtype=torch.int32, device=device)
+
+    # At batch index 256, flat_idx * V * K reaches 2**31 elements. Keep the
+    # state pool compact and leave the 4.02 GiB cache uninitialized so the test
+    # exercises the boundary without unnecessary initialization traffic.
+    cache_backing = torch.empty(
+        B, cache_steps, HV, V, K, dtype=torch.bfloat16, device=device
+    )
+    cache = cache_backing[:, :T]
+    output = gdn_decode_bf16_state_t1_wide_vec(
+        A_log=A_log,
+        a=a,
+        dt_bias=dt_bias,
+        q=q,
+        k=k,
+        v=v,
+        b=b,
+        initial_state_source=state,
+        initial_state_indices=state_indices,
+        intermediate_states_buffer=cache,
+        disable_state_update=False,
+        use_qk_l2norm_in_kernel=True,
+        scale=K**-0.5,
+    )
+
+    ref_cache = torch.empty(1, T, HV, V, K, dtype=torch.bfloat16, device=device)
+    ref_output = gdn_decode_bf16_state_t1_wide_vec(
+        A_log=A_log,
+        a=a[-1:],
+        dt_bias=dt_bias,
+        q=q[-1:],
+        k=k[-1:],
+        v=v[-1:],
+        b=b[-1:],
+        initial_state_source=state,
+        initial_state_indices=state_indices[:1],
+        intermediate_states_buffer=ref_cache,
+        disable_state_update=False,
+        use_qk_l2norm_in_kernel=True,
+        scale=K**-0.5,
+    )
+    torch.cuda.synchronize()
+
+    torch.testing.assert_close(output[-1:], ref_output, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(cache[-1:, :T], ref_cache, atol=1e-2, rtol=1e-2)
+
+
+# ==============================================================================
 # BF16 state FLA-style per-token pool scatter (ssm_state_indices)
 # ==============================================================================
 # vLLM-compatible API: when `ssm_state_indices` (shape [B, T] int32) is passed,
@@ -4030,8 +4401,12 @@ def test_gdn_decode_bf16_state_fla_scatter_padded_pool(
     gated_delta_rule_mtp(**common, initial_state_source=pool_ref)
     torch.cuda.synchronize()
 
-    # Under test: padded pool → slot-slice fallback
-    pool_under_test = pool_padded.clone()
+    # Under test: padded pool → slot-slice fallback. Clone the backing
+    # allocation, not the view: clone() of a non-dense view comes back
+    # contiguous and would take the flat path again.
+    big_under_test = big.clone()
+    pool_under_test = big_under_test[:, :HV, :, :]
+    assert not pool_under_test.is_contiguous()
     gated_delta_rule_mtp(**common, initial_state_source=pool_under_test)
     torch.cuda.synchronize()
 
@@ -4047,6 +4422,16 @@ def test_gdn_decode_bf16_state_fla_scatter_padded_pool(
                 rtol=0,
                 msg=f"padded-pool fallback diverged at (i={i}, t={t}, slot={slot})",
             )
+
+    # The per-slot padding belongs to the caller (vLLM keeps conv state there).
+    torch.testing.assert_close(
+        big_under_test[:, HV:],
+        big[:, HV:],
+        atol=0,
+        rtol=0,
+        equal_nan=True,
+        msg="padded-pool fallback wrote into the per-slot padding",
+    )
 
 
 @pytest.mark.parametrize("max_T", [8])
@@ -4141,8 +4526,13 @@ def test_gdn_decode_bf16_state_fla_scatter_random_slots(
         assert diff == 0, f"unused slot {s} clobbered: {diff}"
 
 
-@pytest.mark.parametrize("max_T", [2, 8])
-@pytest.mark.parametrize("batch_size", [1, 4, 16, 128])
+@parametrize_product(
+    {
+        "max_T": [2, 8],
+        "batch_size": [1, 4, 16, 128],
+    },
+    regular=pairwise_product_cases,
+)
 def test_gdn_decode_fp32_state_fla_scatter_vs_dense(
     batch_size: int,
     max_T: int,

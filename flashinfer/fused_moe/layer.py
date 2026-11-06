@@ -40,7 +40,12 @@ from .api import (
     CudnnFrostMxfp8Mxfp4Config,
     B12xNvfp4Config,
     B12xW4A16Config,
+    CakeStepFunConfig,
     CakeWarpDecodeConfig,
+    CudnnGroupedGemmBf16Config,
+    CudnnGroupedGemmFp8PerTensorConfig,
+    CudnnGroupedGemmMxfp8Config,
+    CudnnGroupedGemmNvfp4Config,
     CutlassBf16Config,
     CutlassFp8BlockConfig,
     CutlassFp8PerTensorConfig,
@@ -61,6 +66,7 @@ from .api import (
     CuTileNvfp4Bf16Config,
     CuTileNvfp4Config,
     CuteDslConfig,
+    FrostLowLatencyConfig,
     MoEActivationPack,
     MoEConfig,
     MoEWeightPack,
@@ -78,7 +84,12 @@ from .api import (
 from .runners import (
     B12xNvfp4Runner,
     B12xW4A16Runner,
+    CakeStepFunRunner,
     CakeWarpDecodeRunner,
+    CudnnGroupedGemmBf16Runner,
+    CudnnGroupedGemmFp8PerTensorRunner,
+    CudnnGroupedGemmMxfp8Runner,
+    CudnnGroupedGemmNvfp4Runner,
     CutlassBf16Runner,
     CutlassFp8BlockRunner,
     CutlassFp8PerTensorRunner,
@@ -114,15 +125,22 @@ from .backends.cudnn_frost.bf16.moe import CudnnFrostBf16MoeRunner
 from .backends.cudnn_frost.mxfp8.moe import CudnnFrostMxfp8MoeRunner
 from .backends.cudnn_frost.nvfp4.moe import CudnnFrostNvfp4MoeRunner
 from .backends.cudnn_frost.mxfp8_mxfp4.moe import CudnnFrostMxfp8Mxfp4MoeRunner
+from .backends.frost_low_latency.runner import FrostLowLatencyRunner
 from .utils import map_to_hybrid_bucket
 
 # Concrete host runners for configured candidates; device kernel loading stays deferred.
 _RunnerT = Union[
+    FrostLowLatencyRunner,
+    CakeStepFunRunner,
     CudnnFrostBf16MoeRunner,
     CudnnFrostMxfp8MoeRunner,
     CudnnFrostNvfp4MoeRunner,
     CudnnFrostMxfp8Mxfp4MoeRunner,
     CakeWarpDecodeRunner,
+    CudnnGroupedGemmBf16Runner,
+    CudnnGroupedGemmFp8PerTensorRunner,
+    CudnnGroupedGemmMxfp8Runner,
+    CudnnGroupedGemmNvfp4Runner,
     CutlassBf16Runner,
     CutlassFp8BlockRunner,
     CutlassFp8PerTensorRunner,
@@ -159,11 +177,17 @@ _RunnerT = Union[
 
 # Map backend-config class -> runner class
 _BACKEND_RUNNERS: Dict[type, Type[_RunnerT]] = {
+    FrostLowLatencyConfig: FrostLowLatencyRunner,
+    CakeStepFunConfig: CakeStepFunRunner,
     CudnnFrostBf16Config: CudnnFrostBf16MoeRunner,
     CudnnFrostMxfp8Config: CudnnFrostMxfp8MoeRunner,
     CudnnFrostNvfp4Config: CudnnFrostNvfp4MoeRunner,
     CudnnFrostMxfp8Mxfp4Config: CudnnFrostMxfp8Mxfp4MoeRunner,
     CakeWarpDecodeConfig: CakeWarpDecodeRunner,
+    CudnnGroupedGemmBf16Config: CudnnGroupedGemmBf16Runner,
+    CudnnGroupedGemmFp8PerTensorConfig: CudnnGroupedGemmFp8PerTensorRunner,
+    CudnnGroupedGemmMxfp8Config: CudnnGroupedGemmMxfp8Runner,
+    CudnnGroupedGemmNvfp4Config: CudnnGroupedGemmNvfp4Runner,
     CutlassBf16Config: CutlassBf16Runner,
     CutlassFp8BlockConfig: CutlassFp8BlockRunner,
     CutlassFp8PerTensorConfig: CutlassFp8PerTensorRunner,
@@ -218,8 +242,8 @@ class MoELayer:
     def __init__(self, config: MoEConfig, device: Optional[torch.device] = None):
         """Build the layer and the set of backend runners it will autotune over.
 
-        Every backend in ``config.backend`` whose hardware preconditions the
-        target device satisfies gets a runner; the rest are skipped here rather
+        Every backend in ``config.backend`` whose hardware preconditions are
+        satisfied by the target device gets a runner; the rest are skipped here rather
         than at call time, so an unsupported backend costs nothing per call.
 
         Parameters
@@ -366,6 +390,8 @@ class MoELayer:
         Only runners that support this pack's ``routing_input_mode`` compete —
         not every backend has an in-kernel router — and the winner is cached
         per ``(token-count bucket, mode)`` so repeated calls skip reselection.
+        Candidate pools containing Frost low-latency use exact token counts
+        because their bounded tactics need not cover every row in a bucket.
 
         Parameters
         ----------
@@ -378,9 +404,12 @@ class MoELayer:
         -------
         torch.Tensor or list of torch.Tensor
             The layer output. With ``config.finalize.do_finalize=False`` the
-            unreduced TRTLLM intermediates are returned instead, as
+            unreduced intermediates are returned instead, as
             ``[gemm2_output, expert_weights, expanded_idx_to_permuted_idx]``,
-            leaving the combine to the caller.
+            leaving the combine to the caller;
+            ``expanded_idx_to_permuted_idx[token * top_k + slot]`` is the row
+            of ``gemm2_output`` holding that assignment, or ``-1`` when its
+            expert is not local.
 
         Raises
         ------
@@ -418,6 +447,14 @@ class MoELayer:
             )
 
         bucket = map_to_hybrid_bucket(act_pack.num_tokens, ceiling)
+        # Frost's bounded decode tactics can require exactly T=4 or T=8.
+        # Sharing their winner with T=3 or T=5..7 is not a valid specialization.
+        # Other candidate pools retain hybrid bucketing; Frost admits at most
+        # eight token counts, so exact keys remain bounded.
+        if any(
+            isinstance(self.runners[index], FrostLowLatencyRunner) for index in eligible
+        ):
+            bucket = act_pack.num_tokens
         # Candidate positions distinguish different options for the same backend
         # and prevent changing weight views or shape eligibility from reusing a winner.
         winner_key = (bucket, mode, eligible)

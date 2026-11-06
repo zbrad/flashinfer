@@ -10,6 +10,7 @@ import torch
 import flashinfer
 import flashinfer.cudnn.decode as cudnn_decode
 from flashinfer.cudnn.utils import (
+    cudnn_frontend_accepts_cuda_graph_replay_hint,
     cudnn_frontend_frost_runtime_available,
     cudnn_frontend_leads_short_caches,
     cudnn_frontend_serves_frost_decode,
@@ -202,6 +203,57 @@ def _dense_offset_case(q_len_per_req=1, packed=False, with_end=True):
         q, k, v, tables, lengths, d**-0.5, q_len_per_req=q_len_per_req
     )
     return run, offsets, out, lse, reference
+
+
+@requires_cudnn_graph
+@pytest.mark.parametrize("q_len_per_req", [1, 3])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_cudnn_decode_without_block_tables(q_len_per_req, dtype):
+    if torch.cuda.get_device_capability()[0] < 8:
+        pytest.skip("cuDNN SDPA requires SM80 or later")
+    torch.manual_seed(61)
+    b, h, hk, d, sk = 2, 8, 2, 128, 32
+    q = torch.randn(b * q_len_per_req, h, d, device="cuda", dtype=dtype)
+    k = torch.randn(b, hk, sk, d, device="cuda", dtype=dtype)
+    v = torch.randn_like(k)
+    lengths = torch.tensor([23, sk], device="cuda", dtype=torch.int32).reshape(
+        b, 1, 1, 1
+    )
+    workspace = torch.empty(128 << 20, device="cuda", dtype=torch.uint8)
+    out = torch.empty_like(q)
+    lse = torch.empty(b * q_len_per_req, h, device="cuda")
+
+    def run():
+        return cudnn_decode.cudnn_batch_decode_with_kv_cache(
+            q,
+            k,
+            v,
+            d**-0.5,
+            workspace,
+            max_sequence_kv=sk,
+            actual_seq_lens_kv=lengths,
+            q_len_per_req=q_len_per_req,
+            out=out,
+            lse=lse,
+            return_lse=True,
+        )
+
+    # The same dense KV buffers are one page per request in the reference.
+    tables = torch.arange(b, device="cuda", dtype=torch.int32).reshape(b, 1)
+    ref, stats = _decode_ref(
+        q, k, v, tables, lengths, d**-0.5, q_len_per_req=q_len_per_req
+    )
+    run()
+    torch.testing.assert_close(out.float(), ref, atol=0.015, rtol=0.015)
+    torch.testing.assert_close(lse, stats, atol=0.003, rtol=0.003)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run()
+    out.fill_(torch.nan)
+    lse.fill_(torch.nan)
+    graph.replay()
+    torch.testing.assert_close(out.float(), ref, atol=0.015, rtol=0.015)
+    torch.testing.assert_close(lse, stats, atol=0.003, rtol=0.003)
 
 
 @requires_cudnn_graph
@@ -2049,3 +2101,195 @@ def test_auto_backend_split_controls_keep_fa2_batch_invariant(control):
         **control,
     )
     assert isinstance(sizes, tuple) and len(sizes) == 2
+
+
+def _caller_block_table(indptr, indices, page_size, min_tokens=2048):
+    """A caller-owned block table, at least the wrapper's declared-cache bucket wide."""
+    batch_size = indptr.numel() - 1
+    pages = int((indptr[1:] - indptr[:-1]).max())
+    table = torch.zeros(
+        (batch_size, max(pages, min_tokens // page_size)),
+        dtype=torch.int32,
+        device=indices.device,
+    )
+    offsets = indptr.cpu().tolist()
+    for i in range(batch_size):
+        table[i, : offsets[i + 1] - offsets[i]] = indices[offsets[i] : offsets[i + 1]]
+    return table
+
+
+@pytest.mark.parametrize("frontend_accepts", [True, False])
+def test_cudnn_wrapper_cuda_graph_passes_the_replay_hint(monkeypatch, frontend_accepts):
+    """A ``use_cuda_graph=True`` cudnn wrapper declares CUDA-graph replay to
+    cudnn-frontend (1.31+ takes ``is_cuda_graph_replay_expected``): the built
+    graph carries the hint and the prepared key differs from an eager wrapper's,
+    so neither serves the other. On the d256 serving shape (32/2 at b=32 over
+    4096 keys) the frontend's leading plan then splits KV where the eager graph
+    does not; both match, and the hinted graph captures and replays. On a
+    frontend without the keyword (here: the probe says no) the graph is built
+    without it and nothing else changes."""
+    if not _auto_cudnn_available():
+        pytest.skip("needs cudnn-frontend 1.30+, its CuTe DSL and an SM100 / SM103 GPU")
+    if frontend_accepts and not cudnn_frontend_accepts_cuda_graph_replay_hint():
+        pytest.skip(
+            "needs a cudnn-frontend whose pygraph takes is_cuda_graph_replay_expected (1.31+)"
+        )
+    if not frontend_accepts:
+        monkeypatch.setattr(
+            cudnn_decode, "cudnn_frontend_accepts_cuda_graph_replay_hint", lambda: False
+        )
+    torch.manual_seed(0)
+    device = "cuda:0"
+    # Distinct shapes per case: the graph cache keys on the replay flag, not on
+    # whether the frontend was handed the hint.
+    b = 32 if frontend_accepts else 4
+    h, hk, d, page, s_kv = 32, 2, 256, 16, 4096
+    q, cache, indptr, indices, last = _wrapper_inputs(
+        b, s_kv, page, hk, h, d, torch.bfloat16, "HND", device
+    )
+    plan_kwargs = dict(q_data_type=torch.bfloat16, kv_data_type=torch.bfloat16)
+    eager = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
+        torch.zeros(128 * 1024 * 1024, dtype=torch.uint8, device=device),
+        "HND",
+        backend="cudnn",
+    )
+    eager.plan(indptr, indices, last, h, hk, d, page, **plan_kwargs)
+    out_eager = eager.run(q, cache)
+    captured = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
+        torch.zeros(128 * 1024 * 1024, dtype=torch.uint8, device=device),
+        "HND",
+        backend="cudnn",
+        use_cuda_graph=True,
+        paged_kv_indptr_buffer=torch.empty_like(indptr),
+        paged_kv_indices_buffer=torch.empty_like(indices),
+        paged_kv_last_page_len_buffer=torch.empty_like(last),
+    )
+    captured.plan(
+        indptr,
+        indices,
+        last,
+        h,
+        hk,
+        d,
+        page,
+        block_tables=_caller_block_table(indptr, indices, page),
+        **plan_kwargs,
+    )
+    out_captured = captured.run(q, cache)  # warm-up builds the graph outside capture
+    g_eager = eager._cudnn_prepared.graph
+    g_captured = captured._cudnn_prepared.graph
+    assert getattr(g_eager, "is_cuda_graph_replay_expected", False) is False
+    assert (
+        bool(getattr(g_captured, "is_cuda_graph_replay_expected", False))
+        is frontend_accepts
+    )
+    assert eager._cudnn_prepared.key != captured._cudnn_prepared.key
+    torch.testing.assert_close(out_captured, out_eager, rtol=1e-2, atol=1e-2)
+    out = torch.empty_like(q)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured.run(q, cache, out=out)
+    out.zero_()
+    graph.replay()
+    torch.cuda.synchronize()
+    torch.testing.assert_close(out, out_eager, rtol=1e-2, atol=1e-2)
+    if (
+        frontend_accepts
+        and hasattr(g_captured, "plans")
+        and hasattr(g_captured, "_plan_index")
+    ):
+        # The hinted graph's leading plan is the GPU-time optimum: at 64 units
+        # over 4096 keys the decode tile splits KV, which the eager-safe lead
+        # does not (split 2 vs 1 on a 148-SM part; the model is SM-count aware).
+        split = lambda g: g.plans[g._plan_index].knobs.split_kv  # noqa: E731
+        assert split(g_captured) >= split(g_eager), (split(g_eager), split(g_captured))
+        if torch.cuda.get_device_properties(0).multi_processor_count == 148:
+            assert (split(g_eager), split(g_captured)) == (1, 2)
+
+
+@pytest.mark.parametrize(
+    "num_qo_heads,num_kv_heads,batch_size", [(32, 4, 32), (64, 8, 12), (16, 4, 64)]
+)
+def test_auto_backend_resolves_cudnn_for_single_token_d256(
+    num_qo_heads, num_kv_heads, batch_size
+):
+    """Single-token head_dim-256 GQA decode inside the d256 band (128 / 96 / 256
+    CTAs) resolves to cudnn on SM100 with cudnn-frontend 1.30+ and matches fa2
+    on output and LSE."""
+    if not _auto_cudnn_available():
+        pytest.skip("needs cudnn-frontend 1.30+, its CuTe DSL and an SM100 / SM103 GPU")
+    wrapper, args = _plan_auto(
+        num_qo_heads=num_qo_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=256,
+        batch_size=batch_size,
+        q_len_per_req=1,
+    )
+    assert wrapper.resolved_backend == "cudnn"
+    out, lse = wrapper.run(args[0], args[1], return_lse=True)
+    out_ref, lse_ref = _reference(args, 1)
+    torch.testing.assert_close(out, out_ref, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(lse, lse_ref, rtol=1e-3, atol=1e-2)
+
+
+def test_auto_backend_d256_band_starts_lower_under_cuda_graph_replay():
+    """64 CTAs of single-token d256 (32/4 at b=16) stay on fa2 for an eager
+    wrapper (the unsplit decode tile loses at 4k) but go to cudnn under
+    use_cuda_graph=True with a caller-owned block table on a frontend that takes
+    the replay hint (1.31+, the tile then splits KV); without that frontend the
+    CUDA-graph wrapper keeps fa2 too."""
+    if not _auto_cudnn_available():
+        pytest.skip("needs cudnn-frontend 1.30+, its CuTe DSL and an SM100 / SM103 GPU")
+    torch.manual_seed(0)
+    b, h, hk, d, page = 16, 32, 4, 256, 16
+    q, cache, indptr, indices, last = _wrapper_inputs(
+        b, 4096, page, hk, h, d, torch.bfloat16, "HND", "cuda:0"
+    )
+    plan_kwargs = dict(q_data_type=torch.bfloat16, kv_data_type=torch.bfloat16)
+    eager = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
+        torch.zeros(128 * 1024 * 1024, dtype=torch.uint8, device=q.device),
+        "HND",
+        backend="auto",
+    )
+    eager.plan(indptr, indices, last, h, hk, d, page, **plan_kwargs)
+    assert eager.resolved_backend in ("fa2", "fa3")
+    captured = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
+        torch.zeros(128 * 1024 * 1024, dtype=torch.uint8, device=q.device),
+        "HND",
+        backend="auto",
+        use_cuda_graph=True,
+        paged_kv_indptr_buffer=torch.empty_like(indptr),
+        paged_kv_indices_buffer=torch.empty_like(indices),
+        paged_kv_last_page_len_buffer=torch.empty_like(last),
+    )
+    captured.plan(
+        indptr,
+        indices,
+        last,
+        h,
+        hk,
+        d,
+        page,
+        block_tables=_caller_block_table(indptr, indices, page, min_tokens=4096),
+        **plan_kwargs,
+    )
+    if not cudnn_frontend_accepts_cuda_graph_replay_hint():
+        assert captured.resolved_backend in ("fa2", "fa3")
+        return
+    assert captured.resolved_backend == "cudnn"
+    out_ref, lse_ref = _run_wrapper(
+        "fa2", q, cache, indptr, indices, last, page, hk, h, d, torch.bfloat16, "HND"
+    )
+    out = torch.empty_like(q)
+    lse = torch.empty(b, h, dtype=torch.float32, device=q.device)
+    captured.run(q, cache, out=out, lse=lse, return_lse=True)  # builds the graph
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured.run(q, cache, out=out, lse=lse, return_lse=True)
+    out.zero_()
+    lse.zero_()
+    graph.replay()
+    torch.cuda.synchronize()
+    torch.testing.assert_close(out, out_ref, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(lse, lse_ref, rtol=1e-3, atol=1e-2)
+    assert captured._cudnn_prepared.graph.is_cuda_graph_replay_expected is True

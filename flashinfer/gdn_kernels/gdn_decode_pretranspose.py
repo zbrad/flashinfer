@@ -1047,6 +1047,9 @@ def run_pretranspose_decode(
     else:
         stride1 = stride2 = stride3 = 0
     target = gdn_device_target(q.device)
+    num_stages, blocks_per_state = _decode_launch_config(
+        target.major, target.minor, B, HV
+    )
     # from_dlpack bakes these dtypes into the compiled signature, and the key also
     # names the on-disk artifact, so an omission collides across processes too
     # (#4214). Unlike q/k/v these convert on load or store, so they are keyed
@@ -1058,9 +1061,6 @@ def run_pretranspose_decode(
         dt_bias.dtype,
         b.dtype,
         output.dtype,
-    )
-    num_stages, blocks_per_state = _decode_launch_config(
-        target.major, target.minor, B, HV
     )
     cache_key = (
         target.compile_key,
