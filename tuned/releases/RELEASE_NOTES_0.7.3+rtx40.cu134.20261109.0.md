@@ -57,7 +57,9 @@ compared with the causal reference gave 3.79.
 
 The same commit fixes `tuned/smoke_test.sh` for variants without a jit-cache: its metadata probe raised on the missing
 `flashinfer-jit-cache` package before printing where flashinfer loads from, so the first smoke run failed the
-"loads from the venv" check with an empty path. The smoke test of the packaged wheel then passed.
+"loads from the venv" check with an empty path. The smoke test of the packaged wheel then passed. The packaging
+commit (`22fbc31a7`) changes only `tuned/package.sh`: it copied the python wheel with its build time, so release.sh
+always found the test log newer than it. The wheel's bytes and sha256 are unchanged.
 
 ## Install
 
