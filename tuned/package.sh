@@ -145,8 +145,10 @@ for i in "${!BUILT_WHEELS[@]}"; do
         python3 -m wheel pack "${UNPACKED}" --dest-dir "${GPU_TUNED_DIST_DIR}"
         INFO_LINES+=("stamped_objects=${stamped}" "host_only_objects=${host_only}")
     else
-        # Pure Python (py3-none-any): no compiled code, nothing to stamp or to check for PTX. Copied byte for byte.
-        cp -p "${BUILT}" "${GPU_TUNED_DIST_DIR}/${BUILT_NAME}"
+        # Pure Python (py3-none-any): no compiled code, nothing to stamp or to check for PTX. Copied byte for byte, but
+        # without -p: the copy's mtime is the packaging time, which release.sh compares with the test log (a variant
+        # with no jit-cache gates this wheel, and a preserved build mtime is always older than the tests).
+        cp "${BUILT}" "${GPU_TUNED_DIST_DIR}/${BUILT_NAME}"
     fi
     WHEEL="${GPU_TUNED_DIST_DIR}/${BUILT_NAME}"
     [[ -f "${WHEEL}" ]] || { echo "ERROR: packaged wheel is not ${BUILT_NAME}." >&2; exit 1; }
