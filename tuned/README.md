@@ -2,8 +2,9 @@
 
 Builds the flashinfer-python wheel and, for variants that ship one, the flashinfer-jit-cache wheel (AOT-compiled kernels)
 for one GPU variant and one CUDA toolkit. The layout and rules are docs/ARCHITECTURE.md in
-[zbrad/tuned-common](https://github.com/zbrad/tuned-common). Only gb10 is built from this repo today (cu134 only);
-rtx40 and rtx50 have settings in `repo.env` but are untested.
+[zbrad/tuned-common](https://github.com/zbrad/tuned-common). gb10 and rtx40 are built from this repo today (cu134
+only; rtx40 ships no AOT jit-cache, so its kernels JIT-compile on first use); rtx50 has settings in `repo.env` but is
+untested.
 
 ```
 CUDA_TAG=cu134 bash tuned/build.sh gb10        # venv + both unstamped wheels   -> tuned/build/cu134/wheel/
