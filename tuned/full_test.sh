@@ -14,6 +14,9 @@
 #      the toolkit libraries resolve (G2);
 #   2. tuned/tests/jit_cache_coverage.py: with FLASHINFER_DISABLE_JIT=1 and an empty workspace, trtllm_utils, every XQA
 #      shape the cache was built for, and a decode kernel all come from the cache, and nothing is compiled.
+#      A variant with no jit-cache (rtx40) runs tuned/tests/jit_kernel_check.py instead: decode, causal prefill and paged
+#      batch decode, bf16 and fp16, JIT-compiled for the device and compared with a float32 reference. The summary line
+#      below keeps its fixed text for every variant, because package.sh and release.sh match it exactly.
 # Skips by design, named in the log header: upstream's pytest suite (tests/) and multi-GPU behaviour. The end-to-end model
 # check is vllm's tuned/gb10_acceptance_test.sh, run in that repo against these wheels.
 #
@@ -79,10 +82,18 @@ SITE_DIR="$(cd "${TESTDIR}" && "${PY}" -I -c 'import sysconfig; print(sysconfig.
     echo "build:   ${BUILD_COMMIT} (label ${LABEL})"
     for w in "${WHEELS[@]}"; do echo "wheel:   $(basename "${w}") sha256 $(sha256sum "${w}" | awk '{print $1}')"; done
     echo "torch:   $(cd "${TESTDIR}" && "${PY}" -I -c 'import torch; print(torch.__version__, "cuda", torch.version.cuda, torch.cuda.get_device_name(0) if torch.cuda.is_available() else "no device")' 2>&1 | tail -1)"
-    echo "scope:   gates; tuned/tests/jit_cache_coverage.py (JIT disabled, empty workspace)"
+    if [[ "${GPU_TUNED_NEEDS_AOT_JIT_CACHE}" == "true" ]]; then
+        echo "scope:   gates; tuned/tests/jit_cache_coverage.py (JIT disabled, empty workspace)"
+    else
+        echo "scope:   gates; tuned/tests/jit_kernel_check.py (no jit-cache for this variant: JIT-compiled decode, prefill and paged batch decode vs a float32 reference)"
+    fi
     echo "devices: CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} (single-GPU build: multi-GPU tests are not part of its scope)"
     echo "skips by design: upstream's pytest suite (tests/) is not run (G3, proposed decision pending the owner, docs/ARCHITECTURE.md); no multi-GPU tests; the model-level check is vllm's acceptance test, run in that repo"
-    echo "gates: wheels installed --no-deps in the build venv; python, jit-cache shim and jit-cache provider wheels are one version; the provider is discovered through its entry point; every jit-cache shared object is single-arch ${GPU_TUNED_FLASHINFER_ARCH} with no PTX; toolkit libs resolve under ${CUDA_HOME}; build commit ${BUILD_COMMIT} == HEAD outside tuned/"
+    if [[ "${GPU_TUNED_NEEDS_AOT_JIT_CACHE}" == "true" ]]; then
+        echo "gates: wheels installed --no-deps in the build venv; python, jit-cache shim and jit-cache provider wheels are one version; the provider is discovered through its entry point; every jit-cache shared object is single-arch ${GPU_TUNED_FLASHINFER_ARCH} with no PTX; toolkit libs resolve under ${CUDA_HOME}; build commit ${BUILD_COMMIT} == HEAD outside tuned/"
+    else
+        echo "gates: the python wheel installed --no-deps in the build venv and loads from it; build commit ${BUILD_COMMIT} == HEAD outside tuned/ (no jit-cache wheels for this variant, so no jit-cache gates)"
+    fi
     echo ""
 } > "${RESULTS_FILE}"
 
@@ -144,6 +155,15 @@ if [[ "${GPU_TUNED_NEEDS_AOT_JIT_CACHE}" == "true" ]]; then
         "${PY}" -I "${REPO_ROOT}/tuned/tests/jit_cache_coverage.py") 2>&1 | tee -a "${RESULTS_FILE}"
     [[ ${PIPESTATUS[0]} -eq 0 ]] || { STATUS=1; echo "jit_cache_coverage.py FAILED" | tee -a "${RESULTS_FILE}"; }
     rm -rf "${COVERAGE_WS}"
+else
+    # No jit-cache ships for this variant, so its kernels compile on first call: compile some and check their results.
+    echo "" | tee -a "${RESULTS_FILE}"
+    echo "=== tuned/tests/jit_kernel_check.py (JIT enabled, empty workspace) ===" | tee -a "${RESULTS_FILE}"
+    KERNEL_WS="$(mktemp -d)"
+    (cd "${TESTDIR}" && env -u FLASHINFER_DISABLE_JIT FLASHINFER_WORKSPACE_BASE="${KERNEL_WS}" \
+        "${PY}" -I -W ignore "${REPO_ROOT}/tuned/tests/jit_kernel_check.py") 2>&1 | tee -a "${RESULTS_FILE}"
+    [[ ${PIPESTATUS[0]} -eq 0 ]] || { STATUS=1; echo "jit_kernel_check.py FAILED" | tee -a "${RESULTS_FILE}"; }
+    [[ "${KERNEL_WS}" == /tmp/tmp.* ]] && rm -rf "${KERNEL_WS}"
 fi
 
 echo "" >> "${RESULTS_FILE}"

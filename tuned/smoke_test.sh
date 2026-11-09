@@ -67,7 +67,20 @@ ok() { echo "  ok:   $*"; }
     fi
     SITE_DIR="$(cd "${WORK}" && "${PY}" -I -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
 
-    meta="$(cd "${WORK}" && "${PY}" -I -c 'import sys, importlib.metadata as md, flashinfer; print("python=" + md.version("flashinfer-python")); print("cache=" + md.version("flashinfer-jit-cache")); print("provider=" + md.version("flashinfer-jit-cache-" + sys.argv[1])); print("file=" + flashinfer.__file__)' "${PROVIDER_TAG}" 2>&1)"
+    # file= first, and a missing jit-cache package reads as <none>: a variant without an AOT jit-cache (rtx40) ships
+    # only flashinfer-python, and a raise there used to hide file= and fail the venv check below.
+    meta="$(cd "${WORK}" && "${PY}" -I -c '
+import sys, importlib.metadata as md, flashinfer
+def ver(name):
+    try:
+        return md.version(name)
+    except md.PackageNotFoundError:
+        return "<none>"
+print("file=" + flashinfer.__file__)
+print("python=" + ver("flashinfer-python"))
+print("cache=" + ver("flashinfer-jit-cache"))
+print("provider=" + ver("flashinfer-jit-cache-" + sys.argv[1]))
+' "${PROVIDER_TAG}" 2>&1)"
     echo "${meta}" | sed 's/^/  | /'
     [[ "$(sed -n 's/^python=//p' <<< "${meta}")" == "${VERSION}" ]] && ok "installed flashinfer-python is exactly ${VERSION}" || fail "installed flashinfer-python is not ${VERSION}"
     if [[ "${GPU_TUNED_NEEDS_AOT_JIT_CACHE}" == "true" ]]; then
