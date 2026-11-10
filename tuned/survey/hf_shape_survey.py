@@ -10,9 +10,9 @@ target GPU, so a row says what shape the model would present, not that the cache
 check is tuned/tests/extra_tests.sh and a run of the model with FLASHINFER_DISABLE_JIT=1.
 
 Run (any python with huggingface_hub and vllm, for example the vllm build venv; HF_TOKEN is read from the environment
-by huggingface_hub if set):
+by huggingface_hub if set). Shells no longer export HF_TOKEN, so give it to this one command with dotfiles' with-secret:
 
-    python tuned/survey/hf_shape_survey.py --limit 300 --out survey.jsonl
+    with-secret huggingface -- python tuned/survey/hf_shape_survey.py --limit 300 --out survey.jsonl
 """
 
 import json
