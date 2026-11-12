@@ -21,7 +21,7 @@ try:
     import cudnn
 
     CUDNN_AVAILABLE = True
-except ImportError:
+except Exception:
     cudnn = None
     CUDNN_AVAILABLE = False
 
