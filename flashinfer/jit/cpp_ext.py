@@ -141,7 +141,7 @@ def ninja_path(path) -> str:
 
 # MSVC host-compiler flags. /Zc:__cplusplus makes cl report the real standard (CUTLASS and CCCL gate on it, and
 # PyTorch's own MSVC build passes it); /MD matches the CRT of Python and torch.
-MSVC_HOST_FLAGS = ["/EHsc", "/MD", "/Zc:__cplusplus", "/Zc:preprocessor", "/DNOMINMAX"]
+MSVC_HOST_FLAGS = ["/EHsc", "/MD", "/Zc:__cplusplus", "/Zc:preprocessor"]
 
 
 def to_msvc_cflags(flags: List[str]) -> List[str]:
@@ -220,6 +220,9 @@ def build_common_cflags(
     # over the CTK-bundled copy. CCCL headers use #pragma system_header
     # internally to suppress warnings. See https://github.com/NVIDIA/cccl/issues/527
     if IS_WINDOWS:
+        # M_PI and friends need _USE_MATH_DEFINES with MSVC's <cmath>; NOMINMAX keeps <windows.h> from defining
+        # min/max macros. Both go to cl and to nvcc's host and device passes.
+        common_cflags += ["-D_USE_MATH_DEFINES", "-DNOMINMAX"]
         # cl.exe has no -isystem, and the CUDA path has spaces.
         for inc_dir in [*cccl_includes, *system_includes]:
             common_cflags.append(f'-I"{inc_dir}"')
