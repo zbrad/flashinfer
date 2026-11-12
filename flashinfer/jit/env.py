@@ -382,6 +382,39 @@ def _cuda_architectures_for_call(
     )
 
 
+if os.name == "nt":
+    import hashlib
+
+    class _ShortJitPath(pathlib.WindowsPath):
+        """A JIT directory whose long path components are shortened when joined.
+
+        JIT module names encode every template parameter and can pass 190 characters, which puts the module
+        directory, its generated sources and its objects past MAX_PATH. nvcc then fails ("file name exceeds
+        ...") and CreateProcess rejects the directory as a working directory. Every component longer than
+        64 characters becomes its first 40 characters plus a 12-hex SHA-256 of the whole component (extension
+        kept), so each module still gets one stable, distinct path wherever it is built from.
+        """
+
+        def __truediv__(self, key):
+            parts = str(key).replace("\\", "/").split("/")
+            return super().__truediv__("/".join(_short_component(part) for part in parts))
+
+        def joinpath(self, *keys):
+            path = self
+            for key in keys:
+                path = path / key
+            return path
+
+    def _short_component(part: str) -> str:
+        if len(part) <= 64:
+            return part
+        root, ext = os.path.splitext(part)
+        if len(ext) > 8:
+            root, ext = part, ""
+        digest = hashlib.sha256(part.encode()).hexdigest()[:12]
+        return f"{root[:40]}_{digest}{ext}"
+
+
 def _get_workspace_dir_name() -> pathlib.Path:
     compilation_context = CompilationContext()
     # NOTE(Zihao): sorted() is crucial here to ensure deterministic directory names.
@@ -398,6 +431,9 @@ def _get_workspace_dir_name() -> pathlib.Path:
 FLASHINFER_WORKSPACE_DIR: pathlib.Path = _get_workspace_dir_name()
 FLASHINFER_JIT_DIR: pathlib.Path = FLASHINFER_WORKSPACE_DIR / "cached_ops"
 FLASHINFER_GEN_SRC_DIR: pathlib.Path = FLASHINFER_WORKSPACE_DIR / "generated"
+if os.name == "nt":
+    FLASHINFER_JIT_DIR = _ShortJitPath(FLASHINFER_JIT_DIR)
+    FLASHINFER_GEN_SRC_DIR = _ShortJitPath(FLASHINFER_GEN_SRC_DIR)
 FLASHINFER_DATA: pathlib.Path = _package_root / "data"
 FLASHINFER_INCLUDE_DIR: pathlib.Path = _package_root / "data" / "include"
 FLASHINFER_CSRC_DIR: pathlib.Path = _package_root / "data" / "csrc"
