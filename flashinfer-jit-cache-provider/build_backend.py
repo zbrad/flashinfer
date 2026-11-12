@@ -133,6 +133,9 @@ def _aot_config_overrides_from_env() -> dict:
     if bools := _list_env("FLASHINFER_AOT_USE_LOGITS_SOFT_CAP"):
         overrides["use_logits_soft_cap"] = [parse_bool(b) for b in bools]
 
+    if patterns := _list_env("FLASHINFER_AOT_MODULE_INCLUDE"):
+        overrides["module_include"] = patterns
+
     for key in [
         "add_comm",
         "add_gemma",

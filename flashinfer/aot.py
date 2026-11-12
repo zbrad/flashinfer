@@ -22,6 +22,7 @@ NOTE (Zihao): The following modules are intentionally excluded from the AOT buil
 
 import argparse
 import os
+import re
 import shutil
 from itertools import product
 from pathlib import Path
@@ -1511,6 +1512,11 @@ def compile_and_package_modules(
         config["add_misc"],
         config["add_xqa"],
     )
+    # zbrad/flashinfer tuned-builds: keep only modules whose name matches one of config["module_include"]
+    # (regexes, re.match), so a variant can ship a scope narrower than the add_* groups allow.
+    if config.get("module_include"):
+        patterns = [re.compile(p) for p in config["module_include"]]
+        jit_specs = [s for s in jit_specs if any(p.match(s.name) for p in patterns)]
     if verbose:
         print("Total ops:", len(jit_specs))
 
