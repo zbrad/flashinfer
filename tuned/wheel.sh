@@ -43,8 +43,9 @@ LABEL="${LOCAL_VERSION#*.cu${CUDA_VERSION_COMPACT}.}"
 echo "Release label: ${LABEL} (local version ${LOCAL_VERSION})"
 
 # Untracked files in the packaged source trees go into the wheel (flashinfer/data/csrc links to csrc/) although the
-# build commit does not name them, and the dirty check below sees tracked files only. A 0.7.4 build here shipped 4,727
-# stale kernel sources that way. Ignored paths (csrc/generated/, build output) are not checked.
+# build commit does not name them, and the dirty check below sees tracked files only. Ignored paths (csrc/generated/,
+# build output) are not checked. (Added for a 0.7.4 build that shipped 4,777 stale sources; that cause turned out to be
+# setuptools' build/lib, cleared below, not untracked files. This check guards the untracked-file route on its own.)
 UNTRACKED="$(git status --porcelain --untracked-files=all -- csrc include flashinfer | grep '^??' || true)"
 [[ -z "${UNTRACKED}" ]] || {
     echo "ERROR: untracked files in csrc/, include/ or flashinfer/ would be packaged into the wheel ($(printf '%s\n' "${UNTRACKED}" | wc -l) files):" >&2
@@ -65,6 +66,10 @@ echo ""
 echo "Building the flashinfer-python wheel (+${LOCAL_VERSION})"
 # Python source only (py3-none-any, no compiled CUDA binary): it exists so `import flashinfer` works in another venv.
 # Kernels JIT-compile on first use unless the flashinfer-jit-cache wheel below is installed beside it.
+# setuptools stages the package in build/lib and never empties it, so a file an earlier build staged ships again even
+# after upstream removed it: 0.7.4 builds here carried 4,777 (gb10) and 1,483 (rtx40) such files from 0.7.3. Start
+# from empty staging dirs; build/aot* (the AOT compile cache) is kept.
+rm -rf "${REPO_ROOT}/build/lib" "${REPO_ROOT}"/build/bdist.*
 FLASHINFER_LOCAL_VERSION="${LOCAL_VERSION}" python3 -m build --wheel --no-isolation --outdir "${GPU_TUNED_WHEEL_DIR}" "${REPO_ROOT}"
 # The wheel build copies licenses/*.txt to the repo root; clean those up so the working tree stays clean. Upstream
 # tracks one of them (LICENSE.kda-for-kda.txt since v0.7.2), so remove only the untracked copies and restore any
