@@ -298,7 +298,7 @@ def _provider_target_compatibility_score(
 
 def get_aot_artifacts(module_name: str) -> Tuple[AOTArtifact, ...]:
     """Resolve the best installed AOT artifact for each visible CUDA target."""
-    fallback_path = FLASHINFER_AOT_DIR / module_name / f"{module_name}{JIT_LIBRARY_SUFFIX}"
+    fallback_path = short_jit_path(FLASHINFER_AOT_DIR) / module_name / f"{module_name}{JIT_LIBRARY_SUFFIX}"
     if fallback_path.exists():
         return (AOTArtifact("flashinfer-python", fallback_path, None),)
 
@@ -310,14 +310,16 @@ def get_aot_artifacts(module_name: str) -> Tuple[AOTArtifact, ...]:
     for target in sorted(target_architectures):
         candidates = []
         for provider in FLASHINFER_AOT_PROVIDERS:
-            if module_name not in provider.modules:
+            if jit_dir_name(module_name) not in provider.modules:
                 continue
             compatibility_score = _provider_target_compatibility_score(
                 provider.cuda_architectures, target
             )
             if compatibility_score is None:
                 continue
-            provider_path = provider.jit_cache_dir / module_name / f"{module_name}{JIT_LIBRARY_SUFFIX}"
+            provider_path = (
+                short_jit_path(provider.jit_cache_dir) / module_name / f"{module_name}{JIT_LIBRARY_SUFFIX}"
+            )
             if provider_path.exists():
                 artifact = AOTArtifact(
                     provider.provider_id,
@@ -333,7 +335,7 @@ def get_aot_artifacts(module_name: str) -> Tuple[AOTArtifact, ...]:
 
 def get_aot_path(module_name: str) -> pathlib.Path:
     """Return the primary path for an AOT module, or its stable fallback path."""
-    fallback_path = FLASHINFER_AOT_DIR / module_name / f"{module_name}{JIT_LIBRARY_SUFFIX}"
+    fallback_path = short_jit_path(FLASHINFER_AOT_DIR) / module_name / f"{module_name}{JIT_LIBRARY_SUFFIX}"
     artifacts = get_aot_artifacts(module_name)
     return artifacts[0].path if artifacts else fallback_path
 
@@ -413,6 +415,16 @@ if os.name == "nt":
             root, ext = part, ""
         digest = hashlib.sha256(part.encode()).hexdigest()[:12]
         return f"{root[:40]}_{digest}{ext}"
+
+
+def short_jit_path(path: pathlib.Path) -> pathlib.Path:
+    """path, with long components shortened on join on Windows (see _ShortJitPath); unchanged elsewhere."""
+    return _ShortJitPath(path) if os.name == "nt" else path
+
+
+def jit_dir_name(module_name: str) -> str:
+    """The directory name a module gets under a short_jit_path root."""
+    return _short_component(module_name) if os.name == "nt" else module_name
 
 
 def _get_workspace_dir_name() -> pathlib.Path:

@@ -1414,7 +1414,7 @@ def copy_built_kernels(
     for jit_spec in jit_specs:
         lib = f"{jit_spec.name}{jit_env.JIT_LIBRARY_SUFFIX}"
         src = jit_env.FLASHINFER_JIT_DIR / jit_spec.name / lib
-        dst = out_dir / jit_spec.name / lib
+        dst = jit_env.short_jit_path(out_dir) / jit_spec.name / lib
         dst.parent.mkdir(exist_ok=False, parents=False)
         shutil.copy2(src, dst)
 
@@ -1460,8 +1460,8 @@ def compile_and_package_modules(
 
     # Update workdir
     jit_env.FLASHINFER_WORKSPACE_DIR = build_dir
-    jit_env.FLASHINFER_JIT_DIR = build_dir / "cached_ops"
-    jit_env.FLASHINFER_GEN_SRC_DIR = build_dir / "generated"
+    jit_env.FLASHINFER_JIT_DIR = jit_env.short_jit_path(build_dir / "cached_ops")
+    jit_env.FLASHINFER_GEN_SRC_DIR = jit_env.short_jit_path(build_dir / "generated")
     jit_env.FLASHINFER_JIT_DIR.mkdir(parents=True, exist_ok=True)
     jit_env.FLASHINFER_GEN_SRC_DIR.mkdir(parents=True, exist_ok=True)
 
