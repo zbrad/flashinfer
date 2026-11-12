@@ -42,6 +42,17 @@ LOCAL_VERSION="$(gpu_tuned_build_local_version "${GPU_TUNED_VARIANT}" "${REPO_RO
 LABEL="${LOCAL_VERSION#*.cu${CUDA_VERSION_COMPACT}.}"
 echo "Release label: ${LABEL} (local version ${LOCAL_VERSION})"
 
+# Untracked files in the packaged source trees go into the wheel (flashinfer/data/csrc links to csrc/) although the
+# build commit does not name them, and the dirty check below sees tracked files only. A 0.7.4 build here shipped 4,727
+# stale kernel sources that way. Ignored paths (csrc/generated/, build output) are not checked.
+UNTRACKED="$(git status --porcelain --untracked-files=all -- csrc include flashinfer | grep '^??' || true)"
+[[ -z "${UNTRACKED}" ]] || {
+    echo "ERROR: untracked files in csrc/, include/ or flashinfer/ would be packaged into the wheel ($(printf '%s\n' "${UNTRACKED}" | wc -l) files):" >&2
+    printf '%s\n' "${UNTRACKED}" | head -10 >&2
+    echo "Remove them (or commit them), then rebuild. List them all with: git status --untracked-files=all -- csrc include flashinfer" >&2
+    exit 1
+}
+
 # Remove the previous build's markers and wheels first: the markers are rewritten only if this build succeeds.
 rm -f "${GPU_TUNED_BUILD_ROOT}/build-commit" "${GPU_TUNED_BUILD_ROOT}/release-label"
 mkdir -p "${GPU_TUNED_WHEEL_DIR}"
