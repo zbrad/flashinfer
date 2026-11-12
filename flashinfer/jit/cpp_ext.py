@@ -331,9 +331,13 @@ def generate_ninja_build_for_op(
     if IS_WINDOWS:
         # The modules' TVM-FFI symbols resolve at link time on Windows, so tvm_ffi.lib is named explicitly.
         tvm_ffi_lib_dir = Path(tvm_ffi.libinfo.find_libtvm_ffi()).parent
+        # A source that includes Python.h under Py_LIMITED_API (common_cflags) gets
+        # #pragma comment(lib, "python3.lib") from pyconfig.h; the import library is in <base_prefix>\libs.
+        python_lib_dir = Path(sys.base_prefix) / "libs"
         ldflags = [
             '/LIBPATH:"$cuda_home/lib/x64"',
             f'/LIBPATH:"{tvm_ffi_lib_dir}"',
+            f'/LIBPATH:"{python_lib_dir}"',
             "cudart.lib",
             "cuda.lib",
             "tvm_ffi.lib",
