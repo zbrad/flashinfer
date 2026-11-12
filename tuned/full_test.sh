@@ -128,7 +128,9 @@ print("provider %s %s: %d modules, archs %s" % (p.distribution, p.version, len(p
             gpu_tuned_verify_arch "${so}" "${GPU_TUNED_FLASHINFER_ARCH}" >/dev/null || { echo "  FAIL: ${so#"${SITE_DIR}"/} is not exactly ${GPU_TUNED_FLASHINFER_ARCH}"; rc=1; }
             # A cuobjdump that cannot run or read the file is a failure, not "no PTX" (H4).
             ptx="$(cuobjdump --list-ptx "${so}" 2>&1)" || { echo "  FAIL: cuobjdump --list-ptx failed on ${so#"${SITE_DIR}"/}: ${ptx}"; rc=1; continue; }
-            [[ -z "$(printf '%s\n' "${ptx}" | grep -oE 'sm_[0-9]+[a-z]?' || true)" ]] || { echo "  FAIL: ${so#"${SITE_DIR}"/} embeds PTX"; rc=1; }
+            # Only cuobjdump's "PTX file <n>: <name>" entries are PTX: its "No PTX file found" message quotes the file name,
+            # which can itself contain sm_<arch> (0.7.4's cake_vsa_sm120_*_sm_121a_*.so did, a false positive).
+            [[ -z "$(printf '%s\n' "${ptx}" | grep -E '^PTX file +[0-9]+:' || true)" ]] || { echo "  FAIL: ${so#"${SITE_DIR}"/} embeds PTX"; rc=1; }
         done < <(find "${SITE_DIR}/flashinfer_data" "${SITE_DIR}/flashinfer_jit_cache" -name '*.so' 2>/dev/null | sort)
         [[ ${n} -gt 0 ]] || { echo "  FAIL: no shared objects in the installed jit-cache"; rc=1; }
         echo "  checked ${n} jit-cache shared objects (${host_only} host-only; the rest single-arch ${GPU_TUNED_FLASHINFER_ARCH}, no PTX)"
