@@ -39,6 +39,15 @@ constexpr auto USE_LOGITS_SOFT_CAP = {{ use_logits_soft_cap }};
 constexpr auto POS_ENCODING_MODE = {{ pos_encoding_mode }};
 constexpr auto USE_SLIDING_WINDOW = {{ use_sliding_window }};
 
+// The CTA_TILE_Q values batch_prefill_{paged,ragged}_kernel_inst.jinja instantiate for this module's head dims;
+// keep the two in step. DISPATCH_CTA_TILE_Q names every tile, and a Windows DLL must resolve every symbol it
+// references at link time, where an ELF shared object leaves the unreachable ones undefined.
+template <uint32_t CTA_TILE_Q>
+constexpr bool kCtaTileQInstantiated =
+    HEAD_DIM_VO >= 512   ? (CTA_TILE_Q == 16 || CTA_TILE_Q == 32)
+    : HEAD_DIM_QK >= 512 ? CTA_TILE_Q == 16
+                         : (CTA_TILE_Q == 16 || CTA_TILE_Q == 64 || CTA_TILE_Q == 128);
+
 #define PAGED_KV_STRIDE_MODE_RUNTIME 0
 #define PAGED_KV_STRIDE_MODE_EQUAL 1
 #define PAGED_KV_STRIDE_MODE_INDEPENDENT 2
