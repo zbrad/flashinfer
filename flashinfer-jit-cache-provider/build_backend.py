@@ -74,14 +74,20 @@ def _ensure_build_inputs() -> None:
     main_build_backend._create_data_dir(use_symlinks=True)
 
 
+# The compiled module suffix, as flashinfer.jit.env.JIT_LIBRARY_SUFFIX (this backend runs before flashinfer is importable).
+_LIBRARY_SUFFIX = ".dll" if os.name == "nt" else ".so"
+
+
 def _write_provider_manifest(jit_cache_dir: Path) -> None:
     modules = sorted(
         module_dir.name
         for module_dir in jit_cache_dir.iterdir()
-        if module_dir.is_dir() and (module_dir / f"{module_dir.name}.so").is_file()
+        if module_dir.is_dir() and (module_dir / f"{module_dir.name}{_LIBRARY_SUFFIX}").is_file()
     )
     if not modules:
-        raise RuntimeError("No .so files were generated for the jit-cache provider")
+        raise RuntimeError(
+            f"No {_LIBRARY_SUFFIX} files were generated for the jit-cache provider"
+        )
 
     manifest = {
         "schema_version": 1,
