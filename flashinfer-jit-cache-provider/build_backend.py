@@ -82,7 +82,9 @@ def _write_provider_manifest(jit_cache_dir: Path) -> None:
     modules = sorted(
         module_dir.name
         for module_dir in jit_cache_dir.iterdir()
-        if module_dir.is_dir() and (module_dir / f"{module_dir.name}{_LIBRARY_SUFFIX}").is_file()
+        # One library per module directory. Not f"{module_dir.name}{_LIBRARY_SUFFIX}": on Windows a long name is
+        # shortened per component (jit.env.short_jit_path), so the file and its directory get different hashes.
+        if module_dir.is_dir() and any(module_dir.glob(f"*{_LIBRARY_SUFFIX}"))
     )
     if not modules:
         raise RuntimeError(
