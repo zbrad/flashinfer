@@ -19,6 +19,9 @@ from ..compilation_context import CompilationContext
 
 logger = logging.getLogger(__name__)
 
+# Native Windows builds use MSVC (cl.exe, link.exe) as nvcc's host compiler and linker.
+IS_WINDOWS = os.name == "nt"
+
 
 def parse_env_flags(env_var_name) -> List[str]:
     env_flags = os.environ.get(env_var_name)
@@ -128,6 +131,51 @@ def join_multiline(vs: List[str]) -> str:
     return " $\n    ".join(vs)
 
 
+def ninja_path(path) -> str:
+    """Escape a path for a ninja build line: Windows drive colons and spaces."""
+    text = str(path)
+    if IS_WINDOWS:
+        text = text.replace("$", "$$").replace(":", "$:").replace(" ", "$ ")
+    return text
+
+
+# MSVC host-compiler flags. /Zc:__cplusplus makes cl report the real standard (CUTLASS and CCCL gate on it, and
+# PyTorch's own MSVC build passes it); /MD matches the CRT of Python and torch.
+MSVC_HOST_FLAGS = ["/EHsc", "/MD", "/Zc:__cplusplus", "/Zc:preprocessor", "/DNOMINMAX"]
+
+
+def to_msvc_cflags(flags: List[str]) -> List[str]:
+    """Translate the GCC-style host flags FlashInfer's generators emit into cl.exe flags."""
+    out = []
+    for flag in flags:
+        if flag.startswith("-std="):
+            out.append("/std:" + flag[len("-std=") :])
+        elif flag in ("-O2", "-O3"):
+            out.append("/O2")
+        elif flag == "-O0":
+            out.append("/Od")
+        elif flag == "-g":
+            out.append("/Z7")
+        elif flag == "-fPIC" or flag.startswith("-Wno-"):
+            continue
+        else:
+            out.append(flag)
+    return out
+
+
+def to_msvc_ldflags(flags: List[str]) -> List[str]:
+    """Translate GCC-style -L/-l flags into link.exe flags; other flags pass through."""
+    out = []
+    for flag in flags:
+        if flag.startswith("-L"):
+            out.append(f'/LIBPATH:"{flag[2:]}"')
+        elif flag.startswith("-l"):
+            out.append(flag[2:] + ".lib")
+        else:
+            out.append(flag)
+    return out
+
+
 def get_cccl_includes() -> List:
     """Get vendored CCCL include directories (added with -I for CTK override precedence)."""
     return [p.resolve() for p in jit_env.CCCL_INCLUDE_DIRS]
@@ -171,6 +219,11 @@ def build_common_cflags(
     # Vendored CCCL headers use -I (not -isystem) so they take precedence
     # over the CTK-bundled copy. CCCL headers use #pragma system_header
     # internally to suppress warnings. See https://github.com/NVIDIA/cccl/issues/527
+    if IS_WINDOWS:
+        # cl.exe has no -isystem, and the CUDA path has spaces.
+        for inc_dir in [*cccl_includes, *system_includes]:
+            common_cflags.append(f'-I"{inc_dir}"')
+        return common_cflags
     for cccl_dir in cccl_includes:
         common_cflags.append(f"-I{cccl_dir}")
     for sys_dir in system_includes:
@@ -195,6 +248,8 @@ def build_cflags(
     if env_extra_cflags is not None:
         cflags += env_extra_cflags
 
+    if IS_WINDOWS:
+        cflags = MSVC_HOST_FLAGS + to_msvc_cflags(cflags)
     return cflags
 
 
@@ -209,7 +264,7 @@ def build_cuda_cflags(
         cuda_cflags += ["-ccbin", cc_env]
     cuda_cflags += [
         "$common_cflags",
-        "--compiler-options=-fPIC",
+        "-Xcompiler=" + ",".join(MSVC_HOST_FLAGS) if IS_WINDOWS else "--compiler-options=-fPIC",
         "--expt-relaxed-constexpr",
     ]
     cuda_version = get_cuda_version()
@@ -270,26 +325,42 @@ def generate_ninja_build_for_op(
         for source, flags in (extra_cuda_cflags_by_source or {}).items()
     }
 
-    ldflags = [
-        "-shared",
-        "-L$cuda_home/lib64",
-        "-L$cuda_home/lib64/stubs",
-        "-lcudart",
-        "-lcuda",
-    ]
+    if IS_WINDOWS:
+        # The modules' TVM-FFI symbols resolve at link time on Windows, so tvm_ffi.lib is named explicitly.
+        tvm_ffi_lib_dir = Path(tvm_ffi.libinfo.find_libtvm_ffi()).parent
+        ldflags = [
+            '/LIBPATH:"$cuda_home/lib/x64"',
+            f'/LIBPATH:"{tvm_ffi_lib_dir}"',
+            "cudart.lib",
+            "cuda.lib",
+            "tvm_ffi.lib",
+        ]
+    else:
+        ldflags = [
+            "-shared",
+            "-L$cuda_home/lib64",
+            "-L$cuda_home/lib64/stubs",
+            "-lcudart",
+            "-lcuda",
+        ]
 
     env_extra_ldflags = parse_env_flags("FLASHINFER_EXTRA_LDFLAGS")
     if env_extra_ldflags is not None:
         ldflags += env_extra_ldflags
 
     if extra_ldflags is not None:
-        ldflags += extra_ldflags
+        ldflags += to_msvc_ldflags(extra_ldflags) if IS_WINDOWS else extra_ldflags
 
-    cxx = os.environ.get("CXX", "c++")
-    nvcc = os.environ.get("FLASHINFER_NVCC", "$cuda_home/bin/nvcc")
+    cxx = os.environ.get("CXX", "cl.exe" if IS_WINDOWS else "c++")
+    nvcc = os.environ.get(
+        "FLASHINFER_NVCC", '"$cuda_home/bin/nvcc"' if IS_WINDOWS else "$cuda_home/bin/nvcc"
+    )
     # Compiler launchers (e.g., sccache, ccache) — empty string when unset
     cxx_launcher = os.environ.get("FLASHINFER_CXX_LAUNCHER", "")
     nvcc_launcher = os.environ.get("FLASHINFER_NVCC_LAUNCHER", "")
+    # Windows ninja rejects a command with leading whitespace, which an unset launcher would leave.
+    win_cxx = "$cxx_launcher $cxx" if cxx_launcher else "$cxx"
+    win_nvcc = "$nvcc_launcher $nvcc" if nvcc_launcher else "$nvcc"
 
     lines = [
         "ninja_required_version = 1.3",
@@ -308,13 +379,25 @@ def generate_ninja_build_for_op(
         "cuda_arch_flags = " + join_multiline(cuda_arch_flags),
         "ldflags = " + join_multiline(ldflags),
         "",
-        "rule compile",
-        "  command = $cxx_launcher $cxx -MMD -MF $out.d $cflags -c $in -o $out $post_cflags",
-        "  depfile = $out.d",
-        "  deps = gcc",
+        *(
+            [
+                "rule compile",
+                f"  command = {win_cxx} /nologo /showIncludes $cflags /c $in /Fo$out $post_cflags",
+                "  deps = msvc",
+            ]
+            if IS_WINDOWS
+            else [
+                "rule compile",
+                "  command = $cxx_launcher $cxx -MMD -MF $out.d $cflags -c $in -o $out $post_cflags",
+                "  depfile = $out.d",
+                "  deps = gcc",
+            ]
+        ),
         "",
         "rule cuda_compile",
-        "  command = $nvcc_launcher $nvcc --generate-dependencies-with-compile -MF $out.d $cuda_cflags -c $in -o $out $cuda_post_cflags",
+        "  command = "
+        + (win_nvcc if IS_WINDOWS else "$nvcc_launcher $nvcc")
+        + " --generate-dependencies-with-compile -MF $out.d $cuda_cflags -c $in -o $out $cuda_post_cflags",
         "  depfile = $out.d",
         "  deps = gcc",
         "",
@@ -336,6 +419,14 @@ def generate_ninja_build_for_op(
             [
                 "rule nvcc_link",
                 "  command = $nvcc -shared $cuda_arch_flags $in $ldflags -o $out",
+                "",
+            ]
+        )
+    elif IS_WINDOWS:
+        lines.extend(
+            [
+                "rule link",
+                "  command = link.exe /nologo /DLL $in $ldflags /OUT:$out",
                 "",
             ]
         )
@@ -361,7 +452,7 @@ def generate_ninja_build_for_op(
         obj_name = f"{source.parent.name}_{source.stem}{object_suffix}"
         obj = str((output_dir / obj_name).resolve())
         objects.append(obj)
-        lines.append(f"build {obj}: {cmd} {source.resolve()}")
+        lines.append(f"build {ninja_path(obj)}: {cmd} {ninja_path(source.resolve())}")
         if source.resolve() in cuda_cflags_by_source:
             lines.append(
                 "  cuda_cflags = "
@@ -393,9 +484,12 @@ def generate_ninja_build_for_op(
 
     lines.append("")
     link_rule = "nvcc_link" if needs_device_linking else "link"
-    output_so = str((output_dir / f"{name}.so").resolve())
-    lines.append(f"build {output_so}: {link_rule} " + " ".join(objects))
-    lines.append(f"default {output_so}")
+    output_so = str((output_dir / f"{name}{jit_env.JIT_LIBRARY_SUFFIX}").resolve())
+    lines.append(
+        f"build {ninja_path(output_so)}: {link_rule} "
+        + " ".join(ninja_path(obj) for obj in objects)
+    )
+    lines.append(f"default {ninja_path(output_so)}")
     lines.append("")
 
     return "\n".join(lines)

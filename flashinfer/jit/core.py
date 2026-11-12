@@ -506,7 +506,11 @@ class JitSpecNvcc(JitSpec):
 
     @property
     def jit_library_path(self) -> Path:
-        return jit_env.FLASHINFER_JIT_DIR / self.name / f"{self.name}.so"
+        return (
+            jit_env.FLASHINFER_JIT_DIR
+            / self.name
+            / f"{self.name}{jit_env.JIT_LIBRARY_SUFFIX}"
+        )
 
     def get_library_path(self) -> Path:
         if self.is_aot:

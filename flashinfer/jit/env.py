@@ -38,6 +38,9 @@ from ..version import __version__ as flashinfer_version
 # _get_cubin_dir() only runs once, at module import.
 logger = logging.getLogger("flashinfer.jit")
 
+# File suffix of a JIT-built module: an MSVC DLL on Windows, an ELF shared object elsewhere.
+JIT_LIBRARY_SUFFIX = ".dll" if os.name == "nt" else ".so"
+
 
 def has_flashinfer_jit_cache() -> bool:
     """
