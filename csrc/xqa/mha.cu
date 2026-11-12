@@ -3099,8 +3099,6 @@ static uint32_t configureKernel() {
   return size;
 }
 
-static uint32_t const hostSmemSize = configureKernel();
-
 void launchMHAFlashInfer(uint32_t multiProcessorCount, uint32_t nbKHeads, uint32_t slidingWinSize,
                          float qScale, float const* qScalePtr, OutputHead* output,
 #if LOW_PREC_OUTPUT
@@ -3123,6 +3121,9 @@ void launchMHAFlashInfer(uint32_t multiProcessorCount, uint32_t nbKHeads, uint32
                          uint64_t sf_stride_page, uint64_t sf_stride_token, uint64_t sf_stride_head,
 #endif
                          cudaStream_t stream) {
+  // Configured on first launch, not at namespace scope: on Windows a namespace-scope initializer runs inside
+  // LoadLibrary under the loader lock, and these CUDA calls deadlock there when CUDA is not yet initialized.
+  static uint32_t const hostSmemSize = configureKernel();
   uint32_t const nbSubSeqPerSeq = [&]() -> uint32_t {
     if (!allowMultiBlockMode) {
       return 1;
