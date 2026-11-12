@@ -28,6 +28,7 @@ from filelock import FileLock
 from ..compilation_context import CompilationContext
 from . import env as jit_env
 from .cpp_ext import generate_ninja_build_for_op, get_nvcc_parallelism_flags, run_ninja
+from .cpp_ext import ninja_path as ninja_escape
 from .utils import write_if_different
 
 os.makedirs(jit_env.FLASHINFER_WORKSPACE_DIR, exist_ok=True)
@@ -882,7 +883,7 @@ def build_jit_specs(
             )
         if skip_prebuilt and spec.aot_path.exists():
             continue
-        lines.append(f"subninja {spec.ninja_path}")
+        lines.append(f"subninja {ninja_escape(spec.ninja_path)}")
         with FileLock(spec.lock_path, thread_local=False):
             spec.write_ninja()
     if not lines:
