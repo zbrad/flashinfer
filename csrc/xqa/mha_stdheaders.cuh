@@ -355,50 +355,50 @@ struct _Tuple_impl<_Idx, _Head, _Tail...>
   explicit DEVICE_FUNC _Tuple_impl(_UHead&& __head, _UTail&&... __tail)
       : _Inherited(forward<_UTail>(__tail)...), _Base(forward<_UHead>(__head)) {}
 
-  DEVICE_FUNC _Tuple_impl(_Tuple_impl const& __in)
-      : _Inherited(__in._M_tail()), _Base(__in._M_head()) {}
+  DEVICE_FUNC _Tuple_impl(_Tuple_impl const& __other)
+      : _Inherited(__other._M_tail()), _Base(__other._M_head()) {}
 
-  DEVICE_FUNC _Tuple_impl(_Tuple_impl&& __in)
-      : _Inherited(move(__in._M_tail())), _Base(forward<_Head>(__in._M_head())) {}
-
-  template <typename... _UElements>
-  DEVICE_FUNC _Tuple_impl(_Tuple_impl<_Idx, _UElements...> const& __in)
-      : _Inherited(__in._M_tail()), _Base(__in._M_head()) {}
+  DEVICE_FUNC _Tuple_impl(_Tuple_impl&& __other)
+      : _Inherited(move(__other._M_tail())), _Base(forward<_Head>(__other._M_head())) {}
 
   template <typename... _UElements>
-  DEVICE_FUNC _Tuple_impl(_Tuple_impl<_Idx, _UElements...>&& __in)
-      : _Inherited(move(__in._M_tail())), _Base(move(__in._M_head())) {}
+  DEVICE_FUNC _Tuple_impl(_Tuple_impl<_Idx, _UElements...> const& __other)
+      : _Inherited(__other._M_tail()), _Base(__other._M_head()) {}
 
-  DEVICE_FUNC _Tuple_impl& operator=(_Tuple_impl const& __in) {
-    _M_head() = __in._M_head();
-    _M_tail() = __in._M_tail();
+  template <typename... _UElements>
+  DEVICE_FUNC _Tuple_impl(_Tuple_impl<_Idx, _UElements...>&& __other)
+      : _Inherited(move(__other._M_tail())), _Base(move(__other._M_head())) {}
+
+  DEVICE_FUNC _Tuple_impl& operator=(_Tuple_impl const& __other) {
+    _M_head() = __other._M_head();
+    _M_tail() = __other._M_tail();
     return *this;
   }
 
-  DEVICE_FUNC _Tuple_impl& operator=(_Tuple_impl&& __in) {
-    _M_head() = move(__in._M_head());
-    _M_tail() = move(__in._M_tail());
-    return *this;
-  }
-
-  template <typename... _UElements>
-  DEVICE_FUNC _Tuple_impl& operator=(_Tuple_impl<_Idx, _UElements...> const& __in) {
-    _M_head() = __in._M_head();
-    _M_tail() = __in._M_tail();
+  DEVICE_FUNC _Tuple_impl& operator=(_Tuple_impl&& __other) {
+    _M_head() = move(__other._M_head());
+    _M_tail() = move(__other._M_tail());
     return *this;
   }
 
   template <typename... _UElements>
-  DEVICE_FUNC _Tuple_impl& operator=(_Tuple_impl<_Idx, _UElements...>&& __in) {
-    _M_head() = move(__in._M_head());
-    _M_tail() = move(__in._M_tail());
+  DEVICE_FUNC _Tuple_impl& operator=(_Tuple_impl<_Idx, _UElements...> const& __other) {
+    _M_head() = __other._M_head();
+    _M_tail() = __other._M_tail();
+    return *this;
+  }
+
+  template <typename... _UElements>
+  DEVICE_FUNC _Tuple_impl& operator=(_Tuple_impl<_Idx, _UElements...>&& __other) {
+    _M_head() = move(__other._M_head());
+    _M_tail() = move(__other._M_tail());
     return *this;
   }
 
  protected:
-  DEVICE_FUNC void _M_swap_impl(_Tuple_impl& __in) {
-    _Base::_M_swap_impl(__in._M_head());
-    _Inherited::_M_swap_impl(__in._M_tail());
+  DEVICE_FUNC void _M_swap_impl(_Tuple_impl& __other) {
+    _Base::_M_swap_impl(__other._M_head());
+    _Inherited::_M_swap_impl(__other._M_tail());
   }
 };
 
@@ -416,46 +416,46 @@ class tuple : public _Tuple_impl<0, _Elements...> {
   explicit DEVICE_FUNC tuple(_UElements&&... __elements)
       : _Inherited(forward<_UElements>(__elements)...) {}
 
-  DEVICE_FUNC tuple(tuple const& __in) : _Inherited(static_cast<_Inherited const&>(__in)) {}
+  DEVICE_FUNC tuple(tuple const& __other) : _Inherited(static_cast<_Inherited const&>(__other)) {}
 
-  DEVICE_FUNC tuple(tuple&& __in) : _Inherited(static_cast<_Inherited&&>(__in)) {}
-
-  template <typename... _UElements>
-  DEVICE_FUNC tuple(tuple<_UElements...> const& __in)
-      : _Inherited(static_cast<_Tuple_impl<0, _UElements...> const&>(__in)) {}
+  DEVICE_FUNC tuple(tuple&& __other) : _Inherited(static_cast<_Inherited&&>(__other)) {}
 
   template <typename... _UElements>
-  DEVICE_FUNC tuple(tuple<_UElements...>&& __in)
-      : _Inherited(static_cast<_Tuple_impl<0, _UElements...>&&>(__in)) {}
+  DEVICE_FUNC tuple(tuple<_UElements...> const& __other)
+      : _Inherited(static_cast<_Tuple_impl<0, _UElements...> const&>(__other)) {}
+
+  template <typename... _UElements>
+  DEVICE_FUNC tuple(tuple<_UElements...>&& __other)
+      : _Inherited(static_cast<_Tuple_impl<0, _UElements...>&&>(__other)) {}
 
   // XXX http://gcc.gnu.org/ml/libstdc++/2008-02/msg00047.html
   template <typename... _UElements>
-  DEVICE_FUNC tuple(tuple<_UElements...>& __in)
-      : _Inherited(static_cast<_Tuple_impl<0, _UElements...> const&>(__in)) {}
+  DEVICE_FUNC tuple(tuple<_UElements...>& __other)
+      : _Inherited(static_cast<_Tuple_impl<0, _UElements...> const&>(__other)) {}
 
-  DEVICE_FUNC tuple& operator=(tuple const& __in) {
-    static_cast<_Inherited&>(*this) = __in;
+  DEVICE_FUNC tuple& operator=(tuple const& __other) {
+    static_cast<_Inherited&>(*this) = __other;
     return *this;
   }
 
-  DEVICE_FUNC tuple& operator=(tuple&& __in) {
-    static_cast<_Inherited&>(*this) = move(__in);
-    return *this;
-  }
-
-  template <typename... _UElements>
-  DEVICE_FUNC tuple& operator=(tuple<_UElements...> const& __in) {
-    static_cast<_Inherited&>(*this) = __in;
+  DEVICE_FUNC tuple& operator=(tuple&& __other) {
+    static_cast<_Inherited&>(*this) = move(__other);
     return *this;
   }
 
   template <typename... _UElements>
-  DEVICE_FUNC tuple& operator=(tuple<_UElements...>&& __in) {
-    static_cast<_Inherited&>(*this) = move(__in);
+  DEVICE_FUNC tuple& operator=(tuple<_UElements...> const& __other) {
+    static_cast<_Inherited&>(*this) = __other;
     return *this;
   }
 
-  void DEVICE_FUNC swap(tuple& __in) { _Inherited::_M_swap_impl(__in); }
+  template <typename... _UElements>
+  DEVICE_FUNC tuple& operator=(tuple<_UElements...>&& __other) {
+    static_cast<_Inherited&>(*this) = move(__other);
+    return *this;
+  }
+
+  void DEVICE_FUNC swap(tuple& __other) { _Inherited::_M_swap_impl(__other); }
 };
 
 template <>
