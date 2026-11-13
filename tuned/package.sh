@@ -132,7 +132,8 @@ for i in "${!BUILT_WHEELS[@]}"; do
             # the file is a failure, not "no PTX" (H4).
             PTX_OUT="$(cuobjdump --list-ptx "${so}" 2>&1)" \
                 || { echo "ERROR: cuobjdump --list-ptx failed on ${so#"${STAGE}"/}; the PTX check cannot run: ${PTX_OUT}" >&2; exit 1; }
-            PTX_FOUND="$(printf '%s\n' "${PTX_OUT}" | grep -oE 'sm_[0-9]+[a-z]?' | sort -u | tr '\n' ' ' || true)"
+            # Only "PTX file <n>: <name>" entries are PTX; "No PTX file found" quotes the file name, which may contain sm_<arch>.
+            PTX_FOUND="$(printf '%s\n' "${PTX_OUT}" | grep -E '^PTX file +[0-9]+:' | grep -oE 'sm_[0-9]+[a-z]?' | sort -u | tr '\n' ' ' || true)"
             [[ -z "${PTX_FOUND// /}" ]] || { echo "ERROR: ${so#"${STAGE}"/} embeds PTX (${PTX_FOUND}): the driver would JIT-compile it at runtime." >&2; exit 1; }
             # fork.commit is the commit the wheel was built from, not HEAD at packaging (package-info.txt has both).
             gpu_tuned_stamp_lib_json "${so}" "${PKG}" "${VERSION}" "" \

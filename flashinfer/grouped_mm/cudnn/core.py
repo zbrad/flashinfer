@@ -29,7 +29,7 @@ from ...gemm.gemm_base import (
     _gemm_workspace_at_least,
     _get_real_fp4_shape_from_packed_uint8,
 )
-from ...utils import _get_cache_buf, get_compute_capability
+from ...utils import _get_stream_cache_buf, get_compute_capability
 
 # ---------------------------------------------------------------------------
 # Optional cuDNN import
@@ -55,6 +55,9 @@ except OSError as e:
 
 _CUDNN_MOE_MIN_VERSION = 92100  # 9.21.0
 _CUDNN_MOE_BLOCK_SCALE_SM12X_MIN_VERSION = 92200  # 9.22.0
+# First backend that reads first_token_offset as explicit boundaries; it keeps
+# the E segment-starts format (deprecated) only for E > 1.
+_CUDNN_MOE_EXPLICIT_OFFSETS_MIN_VERSION = 92800  # 9.28.0
 _CUDNN_MOE_SM107_BF16_FIX_VERSION = 92900  # 9.29.0
 
 
@@ -115,6 +118,31 @@ def _check_cudnn_version(min_ver: int, feature: str):
             "installed `cudnn` Python package. Upgrade with: "
             "pip install -U nvidia-cudnn-frontend"
         )
+
+
+@functools.lru_cache(maxsize=None)
+def _cudnn_moe_explicit_offsets() -> bool:
+    """Whether the loaded cuDNN backend takes explicit MOE offset boundaries."""
+    return cudnn.backend_version() >= _CUDNN_MOE_EXPLICIT_OFFSETS_MIN_VERSION
+
+
+def _cudnn_moe_first_token_offset(m_indptr: torch.Tensor, cum_m: int) -> torch.Tensor:
+    """``first_token_offset`` operand (``[F, 1, 1]`` int32) of the cuDNN MOE grouped matmul.
+
+    FlashInfer passes the ``E`` segment starts ``m_indptr[:-1]``; cuDNN runs the
+    last segment to the token count ``cum_m``. cuDNN >= 9.28 reads ``E + 1``
+    explicit boundaries and keeps the starts format (deprecated) only for
+    ``E > 1``, so there one expert gets ``[m_indptr[0], cum_m]``: the documented
+    migration (append the old end), covering the same rows, also when
+    ``cum_m > m_indptr[-1]``. Older backends do not support explicit boundaries
+    and keep the starts format. Built on the device without a host sync (safe
+    under CUDA-graph capture); the plan-count queries use it too, so their
+    graphs and tactic indices match the runs.
+    """
+    starts = m_indptr[:-1]
+    if starts.numel() == 1 and _cudnn_moe_explicit_offsets():
+        starts = torch.cat((starts, starts.new_full((1,), cum_m)))
+    return starts.reshape(-1, 1, 1).contiguous()
 
 
 def _get_handle(device: torch.device):
@@ -275,7 +303,7 @@ def _cudnn_moe_grouped_gemm_plan_count(
     """
     token_3d = a.unsqueeze(0)
     weight_3d = b.transpose(1, 2)
-    fto = m_indptr[:-1].reshape(-1, 1, 1).contiguous()
+    fto = _cudnn_moe_first_token_offset(m_indptr, a.shape[0])
     _, _, plan_indices = _build_cudnn_moe_grouped_gemm_graph(
         _get_handle(a.device),
         token_3d.shape,
@@ -320,7 +348,7 @@ def _run_cudnn_moe_grouped_gemm(
 
     token_3d = a.unsqueeze(0)
     weight_3d = b.transpose(1, 2)
-    fto = m_indptr[:-1].reshape(-1, 1, 1).contiguous()
+    fto = _cudnn_moe_first_token_offset(m_indptr, cum_m)
     alpha_3d = alpha.unsqueeze(0).unsqueeze(0) if alpha is not None else None
 
     handle = _get_handle(a.device)
@@ -361,7 +389,8 @@ def _run_cudnn_moe_grouped_gemm(
         variant_pack[_CUDNN_UIDs.ALPHA.value] = alpha_3d
 
     workspace = _gemm_workspace_at_least(
-        _get_cache_buf("grouped_mm_workspace", DEFAULT_WORKSPACE_SIZE, a.device), ws
+        _get_stream_cache_buf("grouped_mm_workspace", DEFAULT_WORKSPACE_SIZE, a.device),
+        ws,
     )
     if tactic == -1:
         graph.execute(variant_pack, workspace, handle=handle)
@@ -521,7 +550,7 @@ def _cudnn_moe_block_scale_grouped_gemm_plan_count(
     weight_3d = b.transpose(1, 2)
     token_descale_3d = a_descale.unsqueeze(0)
     weight_descale_3d = b_descale.transpose(1, 2)
-    fto = m_indptr[:-1].reshape(-1, 1, 1).contiguous()
+    fto = _cudnn_moe_first_token_offset(m_indptr, a.shape[0])
     if a.dtype in (torch.uint8, torch.float4_e2m1fn_x2):
         token_shape, token_stride = _get_real_fp4_shape_from_packed_uint8(token_3d)
         weight_shape, weight_stride = _get_real_fp4_shape_from_packed_uint8(weight_3d)
@@ -591,7 +620,7 @@ def _run_cudnn_moe_block_scale_grouped_gemm_mxfp8(
     token_descale_3d = a_descale.unsqueeze(0)
     weight_3d = b.transpose(1, 2)
     weight_descale_3d = b_descale.transpose(1, 2)
-    fto = m_indptr[:-1].reshape(-1, 1, 1).contiguous()
+    fto = _cudnn_moe_first_token_offset(m_indptr, cum_m)
     alpha_3d = alpha.unsqueeze(0).unsqueeze(0) if alpha is not None else None
 
     handle = _get_handle(a.device)
@@ -640,7 +669,9 @@ def _run_cudnn_moe_block_scale_grouped_gemm_mxfp8(
         variant_pack[_CUDNN_UIDs.ALPHA.value] = alpha_3d
 
     workspace = _gemm_workspace_at_least(
-        _get_cache_buf("grouped_mm_mxfp8_workspace", DEFAULT_WORKSPACE_SIZE, a.device),
+        _get_stream_cache_buf(
+            "grouped_mm_mxfp8_workspace", DEFAULT_WORKSPACE_SIZE, a.device
+        ),
         ws,
     )
     if tactic == -1:
@@ -692,7 +723,7 @@ def _run_cudnn_moe_block_scale_grouped_gemm_fp4(
     token_descale_3d = a_descale.unsqueeze(0)
     weight_3d = b.transpose(1, 2)
     weight_descale_3d = b_descale.transpose(1, 2)
-    fto = m_indptr[:-1].reshape(-1, 1, 1).contiguous()
+    fto = _cudnn_moe_first_token_offset(m_indptr, cum_m)
     alpha_3d = alpha.unsqueeze(0).unsqueeze(0) if alpha is not None else None
 
     token_logical_shape, token_logical_stride = _get_real_fp4_shape_from_packed_uint8(
@@ -748,7 +779,10 @@ def _run_cudnn_moe_block_scale_grouped_gemm_fp4(
         variant_pack[_CUDNN_UIDs.ALPHA.value] = alpha_3d
 
     workspace = _gemm_workspace_at_least(
-        _get_cache_buf("grouped_mm_fp4_workspace", DEFAULT_WORKSPACE_SIZE, a.device), ws
+        _get_stream_cache_buf(
+            "grouped_mm_fp4_workspace", DEFAULT_WORKSPACE_SIZE, a.device
+        ),
+        ws,
     )
     if tactic == -1:
         graph.execute(variant_pack, workspace, handle=handle)
