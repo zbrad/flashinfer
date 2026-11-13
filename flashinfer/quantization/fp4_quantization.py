@@ -288,7 +288,9 @@ def get_fp4_quantization_module(backend: str = "100"):
     # as it enables native FP4 conversion instructions (cvt.rn.satfinite.e2m1x2.f32).
     # sm_120f covers the entire SM12x family (both SM120 and SM121).
     # See: https://developer.nvidia.com/blog/nvidia-blackwell-and-nvidia-cuda-12-9-introduce-family-specific-architecture-features/
-    if backend in ("120", "121"):
+    # Tuned (zbrad/flashinfer tuned-builds): SM 12.1 keeps its own module, fp4_quantization_121 (sm_121a), the one the
+    # gb10 jit-cache ships; sm_121a gets the same native conversion (the kernels gate it on __CUDA_ARCH__ >= 1000).
+    if backend == "120":
         from ..utils import version_at_least
 
         if version_at_least(torch.version.cuda, "12.9"):
