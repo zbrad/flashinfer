@@ -17,10 +17,10 @@ from pathlib import Path
 from sys import exit as sys_exit
 
 from flashinfer import __file__ as flashinfer_file
-from flashinfer import BatchDecodeWithPagedKVCacheWrapper
+from flashinfer import BatchDecodeWithPagedKVCacheWrapper, fp4_quantize
 from flashinfer.jit.tllm_utils import gen_trtllm_utils_module
 from flashinfer.xqa import get_xqa_module
-from torch import bfloat16, device, float8_e4m3fn, float16, int32, randn, tensor, uint8, zeros
+from torch import bfloat16, device, float8_e4m3fn, float16, float32, int32, randn, tensor, uint8, zeros
 from torch import dtype as torch_dtype
 from torch.cuda import is_available
 
@@ -94,6 +94,22 @@ class jit_cache_coverage:
         return tuple(out.shape) == (1, 8, 128)
 
     @staticmethod
+    def check_fp4_quantize() -> bool:
+        """gb10 only: the public fp4_quantize selects a module the cache ships (sglang's NVFP4 path, backend "cuda").
+
+        Upstream maps SM 12.1 to the "120f" module when torch's CUDA is >= 12.9; the gb10 cache ships only
+        fp4_quantization_121 (sm_121a), so without the tuned change this raised MissingJITCacheError.
+        """
+        if environ.get("GPU_TUNED_VARIANT") != "gb10":
+            LOGGER.info("fp4_quantize: skipped (variant %s)", environ.get("GPU_TUNED_VARIANT"))
+            return True
+        cuda = device("cuda")
+        x = randn(128, 256, dtype=bfloat16, device=cuda)
+        x_q, scale = fp4_quantize(x, tensor([1.0], dtype=float32, device=cuda), backend="cuda")
+        LOGGER.info("fp4_quantize ran: %s %s, scale %s %s", tuple(x_q.shape), x_q.dtype, tuple(scale.shape), scale.dtype)
+        return tuple(x_q.shape) == (128, 128)
+
+    @staticmethod
     def check_workspace_empty() -> bool:
         base = Path(environ["FLASHINFER_WORKSPACE_BASE"])
         built = sorted(str(p) for p in base.rglob("*.so"))
@@ -114,6 +130,7 @@ class jit_cache_coverage:
             jit_cache_coverage.check_trtllm_utils,
             jit_cache_coverage.check_xqa,
             jit_cache_coverage.check_decode,
+            jit_cache_coverage.check_fp4_quantize,
             jit_cache_coverage.check_workspace_empty,
         ):
             try:
