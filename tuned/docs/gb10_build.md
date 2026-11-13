@@ -122,6 +122,23 @@ Fixed locally in this branch (commit `977e70a9`) and reported upstream:
 If `aot.py` is ever rebased from upstream `main`, re-verify this fix survived
 the merge before assuming Mamba/SSU is covered.
 
+## Bug fixed: fp4_quantize asked for a module the gb10 cache does not ship
+
+Upstream's `get_fp4_quantization_module` (`flashinfer/quantization/fp4_quantization.py`)
+maps SM 12.1 (`"121"`) to the `"120f"` module whenever torch's CUDA is 12.9 or
+newer, so on GB10 with CUDA 13.4 `fp4_quantize` always asked for
+`fp4_quantization_120f`. The cache ships `fp4_quantization_121` (sm_121a), so
+under `FLASHINFER_DISABLE_JIT=1` sglang's NVFP4 path raised
+`MissingJITCacheError`. The tuned change remaps only `"120"`; SM 12.1 keeps its
+own module (commit `ec0ffc146`).
+
+`sm_121a` loses nothing: the native e2m1 conversion is gated on
+`__CUDA_ARCH__ >= 1000` (`csrc/nv_internal/tensorrt_llm/kernels/quantization_utils.cuh`),
+and the two modules' outputs (quantized values and scale factors) were identical
+on 48 cases on a GB10 node. `tuned/tests/jit_cache_coverage.py`
+(`check_fp4_quantize`, gb10 only) calls the public `fp4_quantize` with JIT
+disabled. If this file is merged from upstream again, re-check the remap.
+
 ## Installing into vLLM
 
 Install the two wheels from the release (see its notes) or from `tuned/build/<cuda-tag>/dist/`:
