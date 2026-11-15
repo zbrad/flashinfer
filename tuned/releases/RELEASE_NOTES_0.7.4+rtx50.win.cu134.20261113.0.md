@@ -20,8 +20,10 @@ Release details:
   build.
 - Upstream base: upstream tag `v0.7.4` (`77039051b`), merged into `tuned-builds` as `e4cfd1d1a`, the same base as
   0.7.4+rtx40.cu134.20261112.1.
-- torch: built against the dev-label build `2.15.0+rtx50.cu134.win.20261109.dev0`, whose repack is the zbrad/pytorch
-  pre-release `2.15.0+rtx50.win.cu134.20261109.1`; tested against that pre-release
+- torch: built against the dev-label build `2.15.0+rtx50.cu134.win.20261109.dev0`, whose repack was the zbrad/pytorch
+  pre-release `2.15.0+rtx50.win.cu134.20261109.1`; tested against that pre-release. That torch has been withdrawn;
+  on 2026-11-15 these wheels were tested again, unchanged, against its replacement
+  `2.15.0+rtx50.win.cu134.20261114.2`, which the install command below now uses (see Tests)
 - apache-tvm-ffi: 0.1.16, pinned (see Install)
 - Toolchain: MSVC 14.44.35207 (Windows SDK 10.0.26100.0), CUDA 13.4 (nvcc 13.4.92)
 - sha256:
@@ -41,7 +43,7 @@ This is the first published rtx50-win flashinfer. A 0.7.3 build (0.7.3+rtx50.win
 In `cmd` (in PowerShell, end the lines with a backtick instead of `^`, and use `$env:FLASHINFER_DISABLE_JIT = '1'`):
 
 ```
-pip install "torch @ https://github.com/zbrad/pytorch/releases/download/v2.15.0%2Brtx50.win.cu134.20261109.1/torch-2.15.0%2Brtx50.win.cu134.20261109.1-cp314-cp314-win_amd64.whl" ^
+pip install "torch @ https://github.com/zbrad/pytorch/releases/download/v2.15.0%2Brtx50.win.cu134.20261114.2/torch-2.15.0%2Brtx50.win.cu134.20261114.2-cp314-cp314-win_amd64.whl" ^
   "flashinfer-python @ https://github.com/zbrad/flashinfer/releases/download/v0.7.4%2Brtx50.win.cu134.20261113.0/flashinfer_python-0.7.4%2Brtx50.win.cu134.20261113.0-py3-none-any.whl" ^
   "flashinfer-jit-cache @ https://github.com/zbrad/flashinfer/releases/download/v0.7.4%2Brtx50.win.cu134.20261113.0/flashinfer_jit_cache-0.7.4%2Brtx50.win.cu134.20261113.0-py3-none-any.whl" ^
   "flashinfer-jit-cache-sm120a @ https://github.com/zbrad/flashinfer/releases/download/v0.7.4%2Brtx50.win.cu134.20261113.0/flashinfer_jit_cache_sm120a-0.7.4%2Brtx50.win.cu134.20261113.0-cp39-abi3-win_amd64.whl" ^
@@ -139,6 +141,11 @@ local work paths replaced by placeholders), and `fi_rel_check.py` is the check i
   `windows-dev`) with these wheels and the torch pre-release, the FLASHINFER attention backend, `Qwen/Qwen3-0.6B`. It
   ran eager and then with `torch.compile` and CUDA graphs, under the same conditions (no toolchain, JIT off). Both runs
   produced greedy completions and a seeded sampled batch, and no DLL was compiled into the workspace.
+- **With torch 2.15.0+rtx50.win.cu134.20261114.2, 2026-11-15, passed:** the same release checks in a new venv with
+  that torch and these three wheels (XQA cold load and decode 3.8e-03; decode 5.5e-03 bf16, 4.8e-04 fp16; prefill
+  7.9e-03 bf16, 9.8e-04 fp16; sampling; nothing compiled into the workspace; 770 of 771 DLLs stamped), and vLLM's
+  FLASHINFER backend eager and with `torch.compile`, with no DLL compiled into the workspace. The vLLM build was
+  the same 0.33.1.dev179 as above.
 - **Not run for this build:** upstream's pytest suite. The 0.7.3 dev builds ran `tests/utils/test_sampling.py` and
   `tests/attention/test_xqa.py` on 2026-11-12; they were not rerun on 0.7.4.
 - **Not run:** the `tuned/` gates and test suite (bash, which does not run natively on Windows), and any multi-GPU
