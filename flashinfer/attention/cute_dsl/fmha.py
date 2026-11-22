@@ -90,6 +90,14 @@ def _get_checksums(gpu_arch: str) -> dict[str, str]:
     local_path = FLASHINFER_CUBIN_DIR / checksums_rel
 
     if not local_path.exists():
+        # Same rule as get_artifact(): with downloads disabled a missing file is
+        # an error naming it, not a fetch from the artifact repository.
+        if os.getenv("FLASHINFER_NO_DOWNLOAD"):
+            raise RuntimeError(
+                f"Artifact not found locally: {checksums_rel} "
+                f"(looked at {local_path}). "
+                f"FLASHINFER_NO_DOWNLOAD is set — refusing to download."
+            )
         os.makedirs(local_path.parent, exist_ok=True)
         uri = safe_urljoin(FLASHINFER_CUBINS_REPOSITORY, checksums_rel)
         logger.info(f"Fetching checksums for {gpu_arch} from {uri}")

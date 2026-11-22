@@ -854,3 +854,30 @@ def test_download_artifacts_rejects_bad_download_after_cache_miss(
 
     with pytest.raises(RuntimeError, match="checksum mismatch"):
         artifacts.download_artifacts()
+
+
+def test_dsl_fmha_checksums_respect_no_download(monkeypatch, tmp_path):
+    """The DSL FMHA checksums.txt fetch must honour FLASHINFER_NO_DOWNLOAD.
+
+    It calls download_file() directly instead of get_artifact(), so it needs its
+    own check; otherwise a locked-down install still reaches the network.
+    """
+    fmha = pytest.importorskip("flashinfer.attention.cute_dsl.fmha")
+    from flashinfer.jit import env as jit_env
+
+    def no_network(*args, **kwargs):
+        raise AssertionError("download_file called with FLASHINFER_NO_DOWNLOAD set")
+
+    monkeypatch.setattr(jit_env, "FLASHINFER_CUBIN_DIR", tmp_path)
+    monkeypatch.setattr(cubin_loader, "download_file", no_network)
+    monkeypatch.setattr(fmha, "_checksums_cache", {})
+    monkeypatch.setenv("FLASHINFER_NO_DOWNLOAD", "1")
+
+    with pytest.raises(RuntimeError, match="FLASHINFER_NO_DOWNLOAD is set"):
+        fmha._get_checksums("sm_100a")
+
+    # A checksums.txt already on disk is still used.
+    cached = tmp_path / fmha.DSL_FMHA_ARTIFACT_PATH / fmha._get_cpu_arch() / "sm_100a"
+    cached.mkdir(parents=True)
+    (cached / "checksums.txt").write_text("abc123  variant.so\n")
+    assert fmha._get_checksums("sm_100a") == {"variant": "abc123"}
